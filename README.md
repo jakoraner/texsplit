@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" width="160" alt="TeX Split logo"></p>
+
 # TeX Split
 
 A native Mac app for writing a long LaTeX document chapter by chapter: the
