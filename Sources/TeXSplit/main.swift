@@ -28,15 +28,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    func applicationWillTerminate(_ notification: Notification) { remember() }
+    func applicationWillTerminate(_ notification: Notification) {}
 
     /// Quitting asks about every window with unsaved LaTeX, as closing does.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         remember()
+        terminating = true
         for w in windows {
             guard let win = w.window, win.isDocumentEdited else { continue }
             win.makeKeyAndOrderFront(nil)
-            if !w.windowShouldClose(win) { return .terminateCancel }
+            if !w.windowShouldClose(win) { terminating = false; return .terminateCancel }
         }
         return .terminateNow
     }
@@ -75,9 +76,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return w
     }
 
+    private var terminating = false
+
     func closed(_ w: ChapterWindow) {
         windows.removeAll { $0 === w }
-        remember()
+        // While quitting, windows close one by one; keep the list saved just before.
+        if !terminating { remember() }
     }
 
     @objc func openDocument(_ sender: Any?) {
