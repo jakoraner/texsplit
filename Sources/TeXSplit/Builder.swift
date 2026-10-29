@@ -71,7 +71,13 @@ final class Builder {
             }.joined(separator: "\n")
             .replacingOccurrences(of: "\\begin{document}",
                                   with: "\\makeatletter\\input{texsplit-labels.tex}\\makeatother\n\\begin{document}", options: [], range: nil)
-            try? wrapped.write(to: buildDir.appendingPathComponent("\(jobName).tex"), atomically: true, encoding: .utf8)
+            // Live passes leave out what only the full build needs: the contents and
+            // the lists of figures and tables before the chapter, the bibliography after it.
+            // The chapter's own pages are numbered by \setcounter{page} just before it.
+            let live = live && fm.fileExists(atPath: buildDir.appendingPathComponent("\(jobName).aux").path)
+            let text = live ? wrapped.replacingOccurrences(of: #"\\(tableofcontents|listoffigures|listoftables)\b"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\\printbibliography(\[[^\]]*\])?"#, with: "", options: .regularExpression) : wrapped
+            try? text.write(to: buildDir.appendingPathComponent("\(jobName).tex"), atomically: true, encoding: .utf8)
         }
 
         guard let tectonic = Builder.findTool("tectonic") else {

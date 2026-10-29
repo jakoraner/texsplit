@@ -27,6 +27,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     private var selfTested = false
     private var liveTested = false
     private var liveTestStart: Date?
+    private var liveRound = 0
 
     var layout: Layout = .both { didSet { applyLayout() } }
 
@@ -365,13 +366,13 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     }
     private var liveWork: DispatchWorkItem?
 
-    /// A quick build of the text on screen, once typing has paused for a moment.
+    /// A quick build of the text on screen, 0.3 s after the last keystroke.
     private func scheduleLiveBuild() {
         liveWork?.cancel()
         guard Self.livePreview else { return }
         let w = DispatchWorkItem { [weak self] in self?.rebuild(live: true) }
         liveWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: w)
     }
 
     @objc func toggleLivePreview(_ sender: Any?) {
@@ -496,21 +497,25 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         book.place(on: doc)
         if let id = selectedID { pdfView.selected = book.annotation(for: id) }
         pane.documentChanged()
-        if let t0 = liveTestStart, let doc = pdfView.document, !doc.findString("Livepreviewcheck", withOptions: []).isEmpty {
-            FileHandle.standardError.write(String(format: "LIVETEST word in PDF %.1f s after typing; file on disk unchanged: %@\n",
-                Date().timeIntervalSince(t0),
+        if let t0 = liveTestStart, let doc = pdfView.document, !doc.findString("Livepreviewcheck\(liveRound)", withOptions: []).isEmpty {
+            FileHandle.standardError.write(String(format: "LIVETEST round %d: word in PDF %.1f s after typing; file on disk unchanged: %@\n",
+                liveRound, Date().timeIntervalSince(t0),
                 ((try? String(contentsOf: fileURL, encoding: .utf8))?.contains("Livepreviewcheck") == false) ? "yes" : "NO").data(using: .utf8)!)
             liveTestStart = nil
+            if liveRound < 3 { liveTested = false }
         }
-        if ProcessInfo.processInfo.environment["TEXSPLIT_LIVETEST"] != nil && !liveTested && !building {
+        let seedReady = builder.jobName == "main" || (builder.fullAuxDate != nil && !Self.fullRunning.contains(builder.fullDir.path))
+        if ProcessInfo.processInfo.environment["TEXSPLIT_LIVETEST"] != nil && !liveTested && !building && seedReady && pendingLive == nil {
             liveTested = true
+            liveRound += 1
+            let round = liveRound
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 // Type a word at the end of the chapter's first paragraph, as a person would.
                 let tv = self.editor.textView
                 let ns = tv.string as NSString
                 let r = ns.range(of: "\n\n", range: NSRange(location: ns.range(of: "\\chapter").location, length: ns.length - ns.range(of: "\\chapter").location))
                 tv.setSelectedRange(NSRange(location: r.location, length: 0))
-                tv.insertText(" Livepreviewcheck", replacementRange: tv.selectedRange())
+                tv.insertText(" Livepreviewcheck\(round)", replacementRange: tv.selectedRange())
                 self.liveTestStart = Date()
                 FileHandle.standardError.write("LIVETEST typed\n".data(using: .utf8)!)
             }
