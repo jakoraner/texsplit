@@ -22,7 +22,7 @@ in Preview.
 1. The agent works in the repository: branches, commits, checks.
 2. You read a chapter as a PDF and mark it up: highlights, notes, shapes.
 3. What you want to change yourself, you change in the source beside it.
-   Saving rebuilds the chapter in seconds, so you see the result at once.
+   The PDF follows as you type, a few seconds behind.
 4. ⇧⌘E sends the remaining marks to `render/review/live/`, each with its file
    and line, and the agent works through them.
 5. When the agent saves a file you have open, the window reloads. If you have
@@ -33,6 +33,11 @@ in Preview.
 - **One window per `.tex` file.** Open as many chapters as you like and
   place them side by side. ⌘1, ⌘2 and ⌘3 show the LaTeX only, both, or the
   PDF only.
+- **Live preview.** About a second after you stop typing, the chapter is
+  rebuilt from the text on screen and the PDF updates, roughly 5 seconds
+  from keystroke to page. Your file on disk only changes when you save, so
+  an agent never sees half-typed text. View › Live Preview (⇧⌘L) turns it
+  off; while the LaTeX does not compile, the last good PDF stays.
 - **Fast chapter builds.** Saving (⌘S) rebuilds only that chapter, with
   [Tectonic](https://tectonic-typesetting.github.io/) and SyncTeX, in
   seconds instead of a minute for the whole document.

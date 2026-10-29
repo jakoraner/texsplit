@@ -20,12 +20,13 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     private var sync: SyncTeX?
     private var building = false
-    private var buildAgain = false
     private var lastError: (file: String, line: Int)?
     private var diskDate: Date?
     private var askedAboutDisk = false
     private var watcher: Timer?
     private var selfTested = false
+    private var liveTested = false
+    private var liveTestStart: Date?
 
     var layout: Layout = .both { didSet { applyLayout() } }
 
@@ -286,6 +287,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         case #selector(showBoth(_:)): item.state = layout == .both ? .on : .off
         case #selector(showPDFOnly(_:)): item.state = layout == .pdf ? .on : .off
         case #selector(deleteMark(_:)): return pdfView.selected != nil
+        case #selector(toggleLivePreview(_:)): item.state = Self.livePreview ? .on : .off
         case #selector(sidebarBookmarks(_:)): item.state = pane.sidebarMode == .bookmarks ? .on : .off
         case #selector(contactSheet(_:)): item.state = pane.sidebarMode == .contactSheet ? .on : .off
         case #selector(addBookmark(_:)): item.title = pane.currentPageBookmarked ? "Remove Bookmark" : "Add Bookmark"
@@ -351,6 +353,30 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     func textDidChange(_ notification: Notification) {
         window?.isDocumentEdited = true
         editor.scheduleRecolour()
+        scheduleLiveBuild()
+    }
+
+    // MARK: Live preview
+
+    /// On by default; View › Live Preview (⇧⌘L) turns it off for all windows.
+    static var livePreview: Bool {
+        get { UserDefaults.standard.object(forKey: "livePreview") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "livePreview") }
+    }
+    private var liveWork: DispatchWorkItem?
+
+    /// A quick build of the text on screen, once typing has paused for a moment.
+    private func scheduleLiveBuild() {
+        liveWork?.cancel()
+        guard Self.livePreview else { return }
+        let w = DispatchWorkItem { [weak self] in self?.rebuild(live: true) }
+        liveWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: w)
+    }
+
+    @objc func toggleLivePreview(_ sender: Any?) {
+        Self.livePreview.toggle()
+        if Self.livePreview && window?.isDocumentEdited == true { rebuild(live: true) }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -375,26 +401,46 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     // MARK: Build
 
-    private func rebuild() {
-        if building { buildAgain = true; return }
+    /// A full build (on open, on save, after the whole-thesis build) or a live one
+    /// (while typing). Builds never overlap; what was asked for meanwhile runs next,
+    /// a pending full build winning over a live one.
+    private var pendingLive: Bool?
+
+    private func rebuild(live: Bool = false) {
+        if building {
+            pendingLive = (pendingLive == false || !live) ? false : true
+            return
+        }
         building = true
-        setStatus("Building…")
+        if !live { setStatus("Building…") }
+        // The editor's text, whenever it differs from the file on disk.
+        let text: String? = window?.isDocumentEdited == true ? editor.text : nil
         DispatchQueue.global(qos: .userInitiated).async {
-            let r = self.builder.build()
+            let r = self.builder.build(text: text, live: live)
             DispatchQueue.main.async {
                 self.building = false
                 if r.ok {
                     self.lastError = nil
                     self.setStatus(r.message + (self.builder.jobName == "main" ? "" : " · this chapter only"))
-                    self.showPDF()
-                    self.refreshFullIfStale()
+                    self.showPDFWhenFree()
+                    if !live { self.refreshFullIfStale() }
                 } else {
                     self.lastError = r.errorFile.map { ($0, r.errorLine ?? 0) }
-                    self.setStatus(r.message, error: true)
+                    // Half-typed LaTeX fails all the time; keep the last good PDF and say so quietly.
+                    self.setStatus((live ? "Preview waiting: " : "") + r.message, error: !live)
                 }
-                if self.buildAgain { self.buildAgain = false; self.rebuild() }
+                if let next = self.pendingLive { self.pendingLive = nil; self.rebuild(live: next) }
             }
         }
+    }
+
+    /// Never swap the PDF under a note or text box being typed into.
+    private func showPDFWhenFree() {
+        if pdfView.isEditingMark {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.showPDFWhenFree() }
+            return
+        }
+        showPDF()
     }
 
     /// Chapter numbers, page numbers and references into other chapters come from one
@@ -450,6 +496,25 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         book.place(on: doc)
         if let id = selectedID { pdfView.selected = book.annotation(for: id) }
         pane.documentChanged()
+        if let t0 = liveTestStart, let doc = pdfView.document, !doc.findString("Livepreviewcheck", withOptions: []).isEmpty {
+            FileHandle.standardError.write(String(format: "LIVETEST word in PDF %.1f s after typing; file on disk unchanged: %@\n",
+                Date().timeIntervalSince(t0),
+                ((try? String(contentsOf: fileURL, encoding: .utf8))?.contains("Livepreviewcheck") == false) ? "yes" : "NO").data(using: .utf8)!)
+            liveTestStart = nil
+        }
+        if ProcessInfo.processInfo.environment["TEXSPLIT_LIVETEST"] != nil && !liveTested && !building {
+            liveTested = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                // Type a word at the end of the chapter's first paragraph, as a person would.
+                let tv = self.editor.textView
+                let ns = tv.string as NSString
+                let r = ns.range(of: "\n\n", range: NSRange(location: ns.range(of: "\\chapter").location, length: ns.length - ns.range(of: "\\chapter").location))
+                tv.setSelectedRange(NSRange(location: r.location, length: 0))
+                tv.insertText(" Livepreviewcheck", replacementRange: tv.selectedRange())
+                self.liveTestStart = Date()
+                FileHandle.standardError.write("LIVETEST typed\n".data(using: .utf8)!)
+            }
+        }
         if ProcessInfo.processInfo.environment["TEXSPLIT_SELFTEST"] != nil && !selfTested {
             selfTested = true
             runSelfTest()

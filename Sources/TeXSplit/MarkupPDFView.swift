@@ -91,6 +91,7 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
     private var notePopover: (popover: NSPopover, annotation: PDFAnnotation, text: NSTextView, before: Data?)?
 
     private var book: MarkBook? { host?.book }
+    var isEditingMark: Bool { textEditor != nil || notePopover != nil }
 
     // MARK: geometry helpers
 

@@ -184,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .separator(),
             item("Show Markup Toolbar", #selector(ChapterWindow.toggleMarkupToolbar(_:)), "a", [.command, .shift]),
             item("Show Line in PDF", #selector(ChapterWindow.showInPDF(_:)), "j"),
+            item("Live Preview", #selector(ChapterWindow.toggleLivePreview(_:)), "l", [.command, .shift]),
             .separator(),
             item("Continuous Scroll", #selector(ChapterWindow.displayContinuous(_:)), ""),
             item("Single Page", #selector(ChapterWindow.displaySingle(_:)), ""),

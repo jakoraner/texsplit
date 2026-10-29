@@ -41,12 +41,22 @@ final class Builder {
     var pdfURL: URL { buildDir.appendingPathComponent("\(jobName).pdf") }
     var synctexURL: URL { buildDir.appendingPathComponent("\(jobName).synctex.gz") }
 
-    func build() -> BuildResult {
+    /// `text`: the editor's current text, compiled in place of the file on disk (which
+    /// stays untouched until you save). `live`: one TeX pass reusing the last run's
+    /// .aux and .toc, about 4 s instead of 9; references to labels added since the last
+    /// full build may show ?? until the next save.
+    func build(text: String? = nil, live: Bool = false) -> BuildResult {
         let start = Date()
         let fm = FileManager.default
+        if let free = Builder.freeSpace(), free < 300_000_000 {
+            return fail(start, "Disk almost full (\(free / 1_000_000) MB free): preview paused")
+        }
         try? fm.createDirectory(at: buildDir, withIntermediateDirectories: true)
 
         if let err = prepare(buildDir) { return fail(start, err) }
+        if let text {
+            try? text.write(to: buildDir.appendingPathComponent(rel), atomically: true, encoding: .utf8)
+        }
 
         if jobName != "main" {
             let seed = Seed(aux: fullDir.appendingPathComponent("main.aux"), source: thesisRoot.appendingPathComponent(rel))
@@ -67,7 +77,8 @@ final class Builder {
         guard let tectonic = Builder.findTool("tectonic") else {
             return fail(start, "tectonic not found (brew install tectonic)")
         }
-        let tex = run(tectonic, ["--synctex", "\(jobName).tex"], cwd: buildDir)
+        let canBeQuick = live && fm.fileExists(atPath: buildDir.appendingPathComponent("\(jobName).aux").path)
+        let tex = run(tectonic, ["-k"] + (canBeQuick ? ["-r", "0"] : []) + ["--synctex", "\(jobName).tex"], cwd: buildDir)
         let secs = Date().timeIntervalSince(start)
         if tex.status != 0 {
             let all = tex.err + "\n" + tex.out
@@ -88,7 +99,8 @@ final class Builder {
                                message: String(last), errorFile: nil, errorLine: nil)
         }
         return BuildResult(ok: true, seconds: secs, pdf: pdfURL, synctex: synctexURL,
-                           message: String(format: "Built in %.1f s", secs), errorFile: nil, errorLine: nil)
+                           message: String(format: canBeQuick ? "Live preview · %.1f s" : "Built in %.1f s", secs),
+                           errorFile: nil, errorLine: nil)
     }
 
 
@@ -124,6 +136,12 @@ final class Builder {
     private func fail(_ start: Date, _ msg: String) -> BuildResult {
         BuildResult(ok: false, seconds: Date().timeIntervalSince(start), pdf: pdfURL, synctex: synctexURL,
                     message: msg, errorFile: nil, errorLine: nil)
+    }
+
+    static func freeSpace() -> Int64? {
+        let url = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        return v?.volumeAvailableCapacity.map(Int64.init)
     }
 
     static func findTool(_ name: String) -> String? {
