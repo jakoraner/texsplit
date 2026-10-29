@@ -2,10 +2,31 @@
 
 # TeX Split
 
-A native Mac app for writing a long LaTeX document chapter by chapter: the
-LaTeX source on the left, the compiled PDF on the right, like Overleaf but
-local. The PDF side works like Apple's Preview, so you can mark up the PDF
-with the same tools while you edit the source beside it.
+For people who write a thesis in a Git repository with a coding agent in the
+terminal (Claude Code, Codex and the like), and who still want to write it
+themselves.
+
+In an agentic writing loop you start by commenting. You read the rendered PDF,
+mark what is wrong, and the agent revises; over many rounds it learns how you
+write. But at some point a comment is the long way round: you know the word
+you want, and you just want to change it. For that you need the PDF and the
+LaTeX open together.
+
+TeX Split keeps that reflective friction in the loop. The LaTeX source is on
+the left, where you change a word or rewrite a sentence yourself, and the
+compiled PDF is on the right, where you read and mark it up the way you would
+in Preview.
+
+### The loop
+
+1. The agent works in the repository: branches, commits, checks.
+2. You read a chapter as a PDF and mark it up: highlights, notes, shapes.
+3. What you want to change yourself, you change in the source beside it.
+   Saving rebuilds the chapter in seconds, so you see the result at once.
+4. ⇧⌘E sends the remaining marks to `render/review/live/`, each with its file
+   and line, and the agent works through them.
+5. When the agent saves a file you have open, the window reloads. If you have
+   unsaved edits it asks first, so your own writing is never overwritten.
 
 ## What it does
 
