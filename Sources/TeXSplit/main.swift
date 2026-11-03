@@ -175,6 +175,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .separator(),
             { let f = item("Find…", #selector(NSTextView.performFindPanelAction(_:)), "f"); f.tag = Int(NSFindPanelAction.showFindPanel.rawValue); return f }(),
             { let f = item("Find Next", #selector(NSTextView.performFindPanelAction(_:)), "g"); f.tag = Int(NSFindPanelAction.next.rawValue); return f }(),
+            .separator(),
+            item("Lock Paragraph", #selector(ChapterWindow.lockParagraph(_:)), "l", [.command, .option]),
+            item("Unlock Paragraph", #selector(ChapterWindow.unlockParagraph(_:)), "l", [.command, .option, .shift]),
         ])
         let ctrlCmd: NSEvent.ModifierFlags = [.command, .control]
         let optCmd: NSEvent.ModifierFlags = [.command, .option]

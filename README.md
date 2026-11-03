@@ -70,6 +70,14 @@ in Preview.
   the margin), shows it in the notes list, and sends it with the mark as
   `anchor_text`. Its source line is taken from that sentence, skipping the
   blank and comment lines SyncTeX often lands on between paragraphs.
+- **Locked paragraphs.** Paragraphs you have signed off sit between
+  `% LOCKED <id> <YYYY-MM-DD>` and `% END LOCKED` and are shaded in the
+  editor. Edit › Lock Paragraph (⌥⌘L) wraps the paragraph at the cursor, or
+  every paragraph the selection touches, with an id made of the chapter and
+  its first words (`rw-keyworks`) and today's date; Unlock Paragraph (⇧⌥⌘L)
+  removes the markers around the cursor. Both can be undone. Editing inside
+  a locked paragraph is allowed; the first edit per paragraph and session
+  says in the status bar that the change will need approval.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near
   that line, and other marks move with the line.

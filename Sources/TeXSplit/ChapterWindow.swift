@@ -176,14 +176,29 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     @objc func pdfZoomFit(_ sender: Any?) { pdfView.autoScales = true }
     @objc func pdfActualSize(_ sender: Any?) { pdfView.scaleFactor = 1 }
 
+    /// A warning that stays in front of build messages for a few seconds.
+    private var notice: (text: String, until: Date)?
+
     private func setStatus(_ text: String, error: Bool = false) {
         if ProcessInfo.processInfo.environment["TEXSPLIT_SELFTEST"] != nil {
             FileHandle.standardError.write("STATUS \(text)\n".data(using: .utf8)!)
         }
-        status.attributedTitle = NSAttributedString(string: text, attributes: [
-            .foregroundColor: error ? NSColor.systemRed : NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 12),
-        ])
+        let line = NSMutableAttributedString()
+        if let n = notice, n.until > Date(), n.text != text {
+            line.append(NSAttributedString(string: n.text + "  ·  ", attributes: [
+                .foregroundColor: NSColor.systemOrange, .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            ]))
+        }
+        line.append(NSAttributedString(string: text, attributes: [
+            .foregroundColor: error ? NSColor.systemRed : text == notice?.text ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 12, weight: text == notice?.text ? .medium : .regular),
+        ]))
+        status.attributedTitle = line
+    }
+
+    private func showNotice(_ text: String) {
+        notice = (text, Date().addingTimeInterval(10))
+        setStatus(text)
     }
 
     // MARK: Preview's menus (Tools › Annotate, View › sidebar, Edit › Find)
@@ -410,6 +425,109 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
                 else { self.diskDate = self.modDate(); self.autosave() }
             }
         }
+    }
+
+    // MARK: Locked paragraphs
+
+    /// Regions already warned about this session, by id.
+    private var warnedLocks: Set<String> = []
+    private var editingLocks = false
+
+    /// Editing a locked paragraph is allowed; the first time per region the status bar says so.
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        guard !editingLocks, textView === editor.textView else { return true }
+        let s = textView.string
+        guard s.contains("LOCKED") else { return true }
+        for r in LockedRegion.all(in: s) where NSIntersectionRange(range, r.range).length > 0
+            || (range.length == 0 && range.location > r.range.location && range.location < NSMaxRange(r.range)) {
+            if warnedLocks.insert(r.id).inserted {
+                showNotice("Locked paragraph \(r.id) — changes will need approval")
+            }
+            break
+        }
+        return true
+    }
+
+    private var chapterPrefix: String {
+        var stem = (rel as NSString).lastPathComponent.replacingOccurrences(of: ".tex", with: "")
+        if let r = stem.range(of: #"^[0-9]+[a-z]?_"#, options: .regularExpression) { stem.removeSubrange(r) }
+        // RelatedWork -> rw; Introduction -> int
+        let caps = stem.filter(\.isUppercase)
+        let p = caps.count >= 2 ? String(caps) : String(stem.filter(\.isLetter).prefix(3))
+        return p.lowercased().isEmpty ? "p" : p.lowercased()
+    }
+
+    /// <chapter prefix>-<first two words>, unique within the file.
+    private func lockID(for paragraph: String, in text: String) -> String {
+        var t = paragraph.replacingOccurrences(of: #"(?<!\\)%.*"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\\(cite[a-z]*|ref|cref|Cref|label|eqref|autoref)\*?(\[[^\]]*\])*\{[^}]*\}"#, with: " ", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\\[A-Za-z@]+\*?"#, with: " ", options: .regularExpression)
+        let stop: Set<String> = ["the", "and", "for", "with", "this", "that", "from", "into", "are", "was", "its", "our", "but", "not"]
+        let words = t.lowercased().split { !$0.isLetter }.map(String.init)
+            .filter { $0.count >= 3 && $0.allSatisfy(\.isASCII) && !stop.contains($0) }
+        let slug = String(words.prefix(2).joined().prefix(24))
+        let base = chapterPrefix + "-" + (slug.isEmpty ? "para" : slug)
+        let taken = Set(LockedRegion.all(in: text).map(\.id))
+        var id = base, n = 2
+        while taken.contains(id) { id = "\(base)-\(n)"; n += 1 }
+        return id
+    }
+
+    /// Apply one edit to the editor through the text system, so it can be undone.
+    private func replace(_ range: NSRange, with text: String, actionName: String) {
+        let tv = editor.textView
+        editingLocks = true
+        defer { editingLocks = false }
+        guard tv.shouldChangeText(in: range, replacementString: text) else { return }
+        tv.textStorage?.replaceCharacters(in: range, with: text)
+        tv.didChangeText()
+        tv.undoManager?.setActionName(actionName)
+        editor.recolour()
+    }
+
+    /// ⌥⌘L: wrap the paragraph at the cursor, or every paragraph the selection touches.
+    @objc func lockParagraph(_ sender: Any?) {
+        if layout == .pdf { layout = .both }
+        let ns = editor.text as NSString
+        let sel = editor.textView.selectedRange()
+        if let r = LockedRegion.at(sel.location, in: editor.text) { showNotice("Already locked: \(r.id)"); return }
+        func isBlank(_ lineStart: Int) -> Bool {
+            ns.substring(with: ns.lineRange(for: NSRange(location: lineStart, length: 0))).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        // Grow to the blank lines around the selection.
+        var start = ns.lineRange(for: NSRange(location: min(sel.location, ns.length), length: 0)).location
+        var end = NSMaxRange(ns.lineRange(for: NSRange(location: min(max(sel.location, NSMaxRange(sel) - 1), ns.length), length: 0)))
+        if isBlank(start) && sel.length == 0 { NSSound.beep(); setStatus("Put the cursor in a paragraph to lock it"); return }
+        while start > 0 {
+            let prev = ns.lineRange(for: NSRange(location: start - 1, length: 0))
+            if isBlank(prev.location) { break }
+            start = prev.location
+        }
+        while end < ns.length && !isBlank(end) { end = NSMaxRange(ns.lineRange(for: NSRange(location: end, length: 0))) }
+        // Leave blank lines at either edge of a selection outside.
+        while start < end && isBlank(start) { start = NSMaxRange(ns.lineRange(for: NSRange(location: start, length: 0))) }
+        let body = ns.substring(with: NSRange(location: start, length: end - start))
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
+        let id = lockID(for: body, in: editor.text)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let wrapped = "% LOCKED \(id) \(f.string(from: Date()))\n" + body + (body.hasSuffix("\n") ? "" : "\n") + "% END LOCKED" + (body.hasSuffix("\n") ? "\n" : "")
+        replace(NSRange(location: start, length: end - start), with: wrapped, actionName: "Lock Paragraph")
+        warnedLocks.insert(id)
+        editor.textView.setSelectedRange(NSRange(location: start, length: 0))
+        showNotice("Locked as \(id)")
+    }
+
+    /// ⇧⌥⌘L: remove the markers around the cursor.
+    @objc func unlockParagraph(_ sender: Any?) {
+        let s = editor.text
+        guard let r = LockedRegion.at(editor.textView.selectedRange().location, in: s) else {
+            NSSound.beep(); setStatus("The cursor is not in a locked paragraph"); return
+        }
+        let body = (s as NSString).substring(with: r.body)
+        replace(r.range, with: body, actionName: "Unlock Paragraph")
+        editor.textView.setSelectedRange(NSRange(location: r.range.location, length: 0))
+        showNotice("Unlocked \(r.id)")
     }
 
     func textDidChange(_ notification: Notification) {
