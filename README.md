@@ -96,6 +96,21 @@ in Preview.
 - **Safe beside other editors.** If another program saves a file you have
   open, a window without unsaved edits reloads quietly; one with unsaved
   edits (typed in the last two seconds) asks first.
+- **Marks are never lost to a save.** Before the marks file
+  (`render/review/live/<chapter>-marks.json`) is overwritten, its previous
+  content is copied to `render/review/live/history/<chapter>-<yyyyMMdd-HHmmss>.json`
+  (the last 200 per chapter; empty lists are not kept). A save never leaves
+  out a mark the window has held unless you deleted it (Delete, Cut, or
+  undoing its Add); anything else is put back and logged to stderr. If
+  another program, or another window on the same chapter, changed the marks
+  file, its marks are merged in by id instead of being overwritten, and the
+  window picks the change up within two seconds.
+- **Archiving a round while the app runs.** To start a new round, copy the
+  marks file to `render/review/live/archive/` and write `[]` to it. An empty
+  list written after the app's last save is taken as that reset: the window
+  drops the marks made before it and does not write them back. Marks made
+  after the reset are kept. Quitting the app first still works, and is the
+  safest way when a note is open.
 
 ## Requirements
 

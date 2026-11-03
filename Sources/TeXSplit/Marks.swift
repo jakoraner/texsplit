@@ -90,20 +90,72 @@ struct MarkStore {
 
     var dir: URL { repoRoot.appendingPathComponent("render/review/live", isDirectory: true) }
     var file: URL { dir.appendingPathComponent("\(stem)-marks.json") }
+    /// Every version the app overwrote: `history/<stem>-<yyyyMMdd-HHmmss>.json`.
+    var historyDir: URL { dir.appendingPathComponent("history", isDirectory: true) }
+    /// Versions kept per chapter.
+    static var historyLimit = 200
 
-    func load() -> [Mark] {
-        guard let data = try? Data(contentsOf: file) else { return [] }
+    func decode(_ data: Data) -> [Mark]? {
         let dec = JSONDecoder()
         dec.dateDecodingStrategy = .iso8601
-        return (try? dec.decode([Mark].self, from: data)) ?? []
+        return try? dec.decode([Mark].self, from: data)
     }
 
-    func save(_ marks: [Mark]) {
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    func encode(_ marks: [Mark]) -> Data? {
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         enc.dateEncodingStrategy = .iso8601
-        try? enc.encode(marks).write(to: file, options: .atomic)
+        return try? enc.encode(marks)
+    }
+
+    func load() -> [Mark] { read().flatMap { decode($0.data) } ?? [] }
+
+    /// The file as it is on disk now, and when it was last written.
+    func read() -> (data: Data, date: Date)? {
+        guard let data = try? Data(contentsOf: file) else { return nil }
+        return (data, modDate() ?? .distantPast)
+    }
+
+    func modDate() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: file.path))?[.modificationDate] as? Date
+    }
+
+    /// Write the list as it is, nothing kept. Returns what was written.
+    @discardableResult
+    func write(_ marks: [Mark]) -> Data? {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let data = encode(marks), (try? data.write(to: file, options: .atomic)) != nil else { return nil }
+        return data
+    }
+
+    /// Write the list, first keeping the file's previous content in `history/` when it
+    /// differs and is not an empty list. Returns what was written.
+    @discardableResult
+    func save(_ marks: [Mark]) -> Data? {
+        if let old = try? Data(contentsOf: file), old != encode(marks), decode(old)?.isEmpty != true {
+            keepInHistory(old)
+        }
+        return write(marks)
+    }
+
+    private func keepInHistory(_ data: Data) {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: historyDir, withIntermediateDirectories: true)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let base = "\(stem)-\(f.string(from: Date()))"
+        var url = historyDir.appendingPathComponent("\(base).json")
+        var n = 2
+        while fm.fileExists(atPath: url.path) { url = historyDir.appendingPathComponent("\(base)-\(n).json"); n += 1 }
+        try? data.write(to: url, options: .atomic)
+        // Oldest first, by when they were written; keep the newest `historyLimit`.
+        let pattern = "^" + NSRegularExpression.escapedPattern(for: stem) + #"-\d{8}-\d{6}(-\d+)?\.json$"#
+        let mine = ((try? fm.contentsOfDirectory(at: historyDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.lastPathComponent.range(of: pattern, options: .regularExpression) != nil }
+        func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast }
+        let sorted = mine.sorted { (date($0), $0.lastPathComponent) < (date($1), $1.lastPathComponent) }
+        for u in sorted.dropLast(Self.historyLimit) { try? fm.removeItem(at: u) }
     }
 
     /// Write the queue (`-comments.json` + `.md`) and a copy of the marked PDF. Returns the .md URL.
@@ -303,9 +355,108 @@ final class MarkBook {
     var refresh: ((PDFPage) -> Void)?
     let undo = UndoManager()
 
+    /// The last version of every mark this book has held. A save never leaves one of
+    /// them out unless it was deleted on purpose (`deleted`): whatever else drops a mark
+    /// from `marks`, it is put back before the file is written.
+    private var known: [String: Mark] = [:]
+    /// Marks deleted by hand (Delete, Cut, undoing an Add), per marks file, shared by
+    /// every window on that file, so another window's stale list does not bring them back.
+    private static var deletedByFile: [String: Set<String>] = [:]
+    private var deleted: Set<String> {
+        get { Self.deletedByFile[store.file.path] ?? [] }
+        set { Self.deletedByFile[store.file.path] = newValue }
+    }
+    /// The file's content and date as this book last read or wrote it; anything else on
+    /// disk was written by another process (or another window).
+    private var seen: Data?
+    private var seenDate: Date?
+
     init(store: MarkStore) {
         self.store = store
-        marks = store.load()
+        let disk = store.read()
+        marks = disk.flatMap { store.decode($0.data) } ?? []
+        if let disk, marks.isEmpty, store.decode(disk.data) == nil {
+            log("\(store.file.lastPathComponent) could not be read; it is kept in history/ before it is next written")
+        }
+        seen = disk?.data
+        seenDate = disk?.date
+        for m in marks { known[m.id] = m }
+    }
+
+    private func log(_ s: String) {
+        FileHandle.standardError.write("TeX Split marks (\(store.stem)): \(s)\n".data(using: .utf8)!)
+    }
+
+    // MARK: the file
+
+    /// Write the list, after taking in what changed on disk and putting back any mark
+    /// that went missing without being deleted.
+    private func persist() {
+        reconcile()
+        dropDeleted()
+        let ids = Set(marks.map(\.id))
+        let lost = known.values.filter { !ids.contains($0.id) && !deleted.contains($0.id) }.sorted { $0.created < $1.created }
+        if !lost.isEmpty {
+            log("kept \(lost.count) mark(s) that were about to be dropped without being deleted: \(lost.map(\.id).joined(separator: ", "))")
+            marks += lost
+        }
+        if let data = store.save(marks) {
+            seen = data
+            seenDate = store.modDate()
+        }
+    }
+
+    /// Take in a marks file another process changed. An empty list written after ours is
+    /// the archive procedure (archive, write `[]`, read on): the marks made before it are
+    /// dropped. Anything else is merged by id, ours winning. Returns true if `marks` changed.
+    @discardableResult
+    private func reconcile() -> Bool {
+        guard let disk = store.read(), disk.data != seen else { return false }
+        defer { seen = disk.data; seenDate = disk.date }
+        guard let theirs = store.decode(disk.data) else {
+            log("\(store.file.lastPathComponent) was changed by another program and cannot be read; keeping ours (the file goes to history/)")
+            return false
+        }
+        if theirs.isEmpty, disk.date >= (seenDate ?? .distantPast) {
+            let gone = marks.filter { $0.created <= disk.date }
+            guard !gone.isEmpty else { return false }
+            log("the file was emptied at \(disk.date) (archived?): dropping \(gone.count) mark(s) made before that")
+            for m in gone {
+                if let a = annotationOf[m.id], let page = a.page { page.removeAnnotation(a); refresh?(page) }
+                annotationOf[m.id] = nil
+                known[m.id] = nil
+            }
+            let goneIDs = Set(gone.map(\.id))
+            idOf = idOf.filter { !goneIDs.contains($0.value) }
+            marks.removeAll { goneIDs.contains($0.id) }
+            return true
+        }
+        let ours = Set(marks.map(\.id))
+        let new = theirs.filter { !ours.contains($0.id) && !deleted.contains($0.id) }
+        guard !new.isEmpty else { return false }
+        log("the file was changed by another program: merged \(new.count) mark(s) from it")
+        for m in new { marks.append(m); known[m.id] = m }
+        return true
+    }
+
+    /// Marks deleted in another window on the same file.
+    private func dropDeleted() {
+        let gone = marks.filter { deleted.contains($0.id) }
+        for m in gone {
+            if let a = annotationOf[m.id], let page = a.page { page.removeAnnotation(a); refresh?(page) }
+            if let a = annotationOf[m.id] { idOf[ObjectIdentifier(a)] = nil }
+            annotationOf[m.id] = nil
+        }
+        if !gone.isEmpty { marks.removeAll { deleted.contains($0.id) } }
+    }
+
+    /// Called by the window's timer: take in a marks file changed by someone else.
+    /// Returns true when the marks changed; the caller then places them again.
+    func syncFromDisk() -> Bool {
+        guard let d = store.modDate(), d != seenDate else { return false }
+        guard reconcile() else { return false }
+        persist()
+        return true
     }
 
     func owns(_ a: PDFAnnotation) -> Bool { idOf[ObjectIdentifier(a)] != nil }
@@ -349,7 +500,9 @@ final class MarkBook {
         if let i = marks.firstIndex(where: { $0.id == m.id }) { marks[i] = m } else { marks.append(m) }
         idOf[ObjectIdentifier(a)] = m.id
         annotationOf[m.id] = a
-        store.save(marks)
+        known[m.id] = m
+        deleted.remove(m.id)
+        persist()
         onChange?()
         return m
     }
@@ -367,10 +520,11 @@ final class MarkBook {
         guard let page = a.page, let id = idOf[ObjectIdentifier(a)] else { return }
         let quoted = mark(for: a)?.quoted
         page.removeAnnotation(a)
+        deleted.insert(id)
         marks.removeAll { $0.id == id }
         idOf[ObjectIdentifier(a)] = nil
         annotationOf[id] = nil
-        store.save(marks)
+        persist()
         onChange?()
         undo.registerUndo(withTarget: self) { $0.add(a, to: page, quoted: quoted) }
         undo.setActionName("Delete \(MarkBook.label(a))")
@@ -418,6 +572,8 @@ final class MarkBook {
         idOf.removeAll()
         annotationOf.removeAll()
         unfound = 0
+        reconcile()
+        dropDeleted()
         let author = NSFullUserName()
         var text: SqueezedText?
         for i in marks.indices {
@@ -459,9 +615,10 @@ final class MarkBook {
             m.y = Double(page.bounds(for: .mediaBox).height - a.bounds.maxY)
             m.anchorY = expected.y
             marks[i] = m
+            known[m.id] = m
         }
         undo.removeAllActions()
-        store.save(marks)
+        persist()
         onChange?()
     }
 

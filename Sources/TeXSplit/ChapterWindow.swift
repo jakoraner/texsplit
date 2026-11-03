@@ -61,7 +61,10 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         editor.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
         if FileManager.default.fileExists(atPath: builder.pdfURL.path) { showPDF() }
         rebuild()
-        watcher = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.checkDisk() }
+        watcher = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.checkMarksFile()
+            self?.checkDisk()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -428,6 +431,20 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
                 else { self.diskDate = self.modDate(); self.autosave() }
             }
         }
+    }
+
+    /// The marks file changed under us (an agent added marks, or the archive procedure
+    /// emptied it): take that in and draw the marks again.
+    private func checkMarksFile() {
+        guard !pdfView.isEditingMark, book.syncFromDisk() else { return }
+        if let doc = pdfView.document {
+            let selectedID = pdfView.selected.flatMap { book.mark(for: $0)?.id }
+            pdfView.selected = nil
+            book.place(on: doc)
+            if let id = selectedID { pdfView.selected = book.annotation(for: id) }
+            pdfView.needsDisplay = true
+        }
+        setStatus("Marks file changed on disk: \(book.marks.count) mark(s) now")
     }
 
     // MARK: Last round
