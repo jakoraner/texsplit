@@ -104,6 +104,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
             return url
         }
         book.locate = { [weak self] page, point in self?.sourceLine(page: page, point: point) }
+        book.refine = { [weak self] file, line, text in self?.textLine(file: file, near: line, text: text) ?? line }
         book.position = { [weak self] file, line in
             guard let pos = self?.sync?.position(rel: file, line: line) else { return nil }
             return (pos.page, pos.y)
@@ -616,6 +617,34 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         // The chapter-only wrapper is main.tex line for line, with other chapters commented out.
         if path == "\(builder.jobName).tex" { path = "main.tex" }
         return (path, hit.line)
+    }
+
+    /// The source line near `line` that holds `text`: SyncTeX often answers with the
+    /// blank line between two paragraphs, or a comment. Lines within 30 either way
+    /// are scored by how many of the text's words they contain; ties go to the nearest.
+    func textLine(file: String, near line: Int, text: String) -> Int {
+        let source = file == rel || file.hasSuffix("/" + rel) ? editor.text
+            : (try? String(contentsOf: thesisRoot.appendingPathComponent(file), encoding: .utf8)) ?? ""
+        let lines = source.components(separatedBy: "\n")
+        guard line >= 1, line <= lines.count else { return line }
+        let words = Set(text.lowercased().split { !$0.isLetter }.map(String.init).filter { $0.count >= 4 })
+        func usable(_ i: Int) -> Bool {
+            let t = lines[i - 1].trimmingCharacters(in: .whitespaces)
+            return !t.isEmpty && !t.hasPrefix("%")
+        }
+        func score(_ i: Int) -> Int {
+            let l = lines[i - 1].lowercased()
+            return words.reduce(0) { $0 + (l.contains($1) ? 1 : 0) }
+        }
+        if usable(line) && (words.isEmpty || score(line) > 0) { return line }
+        var best: (line: Int, score: Int, dist: Int)?
+        for d in 0...30 {
+            for i in Set([line - d, line + d]) where i >= 1 && i <= lines.count && usable(i) {
+                let sc = score(i)
+                if best == nil || sc > best!.score { best = (i, sc, d) }
+            }
+        }
+        return best?.line ?? line
     }
 
     func commandClick(page: PDFPage, point: NSPoint) {

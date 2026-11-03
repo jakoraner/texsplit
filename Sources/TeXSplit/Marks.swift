@@ -9,6 +9,9 @@ struct Mark: Codable {
     var id: String
     var kind: String          // PDF subtype as Preview writes it: Highlight, Underline, StrikeOut, Text, FreeText, Square, Circle, Line, Ink
     var quoted: String        // marked text (text markups)
+    /// Notes and text boxes: the sentence of the PDF text nearest to them, so a
+    /// note always says what it is about. Optional: older marks files lack it.
+    var anchor: String?
     var comment: String
     var file: String          // relative to the thesis folder, e.g. Chapters/05_Methods.tex
     var line: Int
@@ -25,6 +28,53 @@ struct Mark: Codable {
     static func newID() -> String { String(UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(8)) }
     static let textMarkups: Set<String> = ["Highlight", "Underline", "StrikeOut"]
     var isTextMarkup: Bool { Mark.textMarkups.contains(kind) }
+    static let anchored: Set<String> = ["Text", "FreeText"]
+    /// The text a mark is about: what it marks, else the sentence beside it.
+    var context: String { quoted.isEmpty ? anchor ?? "" : quoted }
+}
+
+/// The PDF text nearest to a point: the line under it, or the closest line above
+/// or below, also when the point is in the margin. Returns the sentence that line
+/// belongs to and a point on the line itself, for SyncTeX.
+func nearestText(on page: PDFPage, at p: NSPoint) -> (sentence: String, probe: NSPoint)? {
+    let box = page.bounds(for: .mediaBox)
+    func line(at q: NSPoint) -> PDFSelection? {
+        guard box.contains(q), let s = page.selectionForLine(at: q),
+              let t = s.string, t.trimmingCharacters(in: .whitespacesAndNewlines).count > 1 else { return nil }
+        return s
+    }
+    // Where it was dropped, then towards the text column (notes often sit in the margin).
+    let xs = [p.x, box.midX, box.minX + box.width * 0.3, box.minX + box.width * 0.7]
+    var found: PDFSelection?
+    search: for dy in stride(from: CGFloat(0), through: 80, by: 2) {
+        for x in xs {
+            for y in dy == 0 ? [p.y] : [p.y - dy, p.y + dy] {   // below first: a note sits at the start of what it is about
+                if let s = line(at: NSPoint(x: x, y: y)) { found = s; break search }
+            }
+        }
+    }
+    guard let sel = found, let lineText = sel.string else { return nil }
+    let r = sel.bounds(for: page)
+    let probe = NSPoint(x: r.minX + min(8, r.width / 2), y: r.midY)
+    return (sentence(around: lineText, in: page.string ?? ""), probe)
+}
+
+/// The sentence of `text` a line belongs to, at most about 400 characters;
+/// the line itself if it is not found in the page text.
+func sentence(around line: String, in pageText: String) -> String {
+    let clean = { (s: String) in s.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+    let l = clean(line)
+    let page = clean(pageText) as NSString
+    let hit = page.range(of: l)
+    guard hit.location != NSNotFound else { return l }
+    // A sentence ends at ".", "?" or "!" followed by a space.
+    let ender: Set<unichar> = [46, 63, 33]
+    func endsSentence(_ i: Int) -> Bool { i >= 1 && i < page.length && page.character(at: i) == 32 && ender.contains(page.character(at: i - 1)) }
+    var start = hit.location
+    while start > 0 && hit.location - start < 250 && !endsSentence(start - 1) { start -= 1 }
+    var end = NSMaxRange(hit)
+    while end < page.length && end - NSMaxRange(hit) < 250 && !endsSentence(end) { end += 1 }
+    return page.substring(with: NSRange(location: start, length: end - start)).trimmingCharacters(in: .whitespaces)
 }
 
 func subtypeName(_ a: PDFAnnotation) -> String {
@@ -66,7 +116,7 @@ struct MarkStore {
         let rows: [[String: Any]] = marks.sorted { ($0.page, $0.y) < ($1.page, $1.y) }.map { m in
             [
                 "id": m.id, "page": m.page, "type": m.kind, "author": author,
-                "comment": m.comment, "quoted": m.quoted, "anchor_text": m.quoted,
+                "comment": m.comment, "quoted": m.quoted, "anchor_text": m.context,
                 "file": "\(thesisFolder)/\(m.file)", "line": m.line, "source_line": sourceLine(m),
             ]
         }
@@ -78,6 +128,7 @@ struct MarkStore {
             md += "\n## [\(r["id"]!)] p.\(r["page"]!) · \(r["type"]!) → `\(r["file"]!):\(r["line"]!)`\n\n"
             md += "- **by:** \(author)\n"
             if let q = r["quoted"] as? String, !q.isEmpty { md += "- **marked text:** \(q)\n" }
+            else if let q = r["anchor_text"] as? String, !q.isEmpty { md += "- **next to:** \(q)\n" }
             md += "- **source line:** `\(r["source_line"]!)`\n\n"
             let c = r["comment"] as? String ?? ""
             md += c.isEmpty ? "> _(no comment text — mark only)_\n" : c.split(separator: "\n").map { "> \($0)" }.joined(separator: "\n") + "\n"
@@ -98,6 +149,9 @@ final class MarkBook {
     private let store: MarkStore
     /// (page, x, y) top-left -> (file, line), and (file, line) -> (page, y)
     var locate: ((PDFPage, NSPoint) -> (String, Int)?)?
+    /// (file, SyncTeX line, text) -> the nearby source line that holds that text,
+    /// skipping the blank and comment lines SyncTeX often lands on between paragraphs.
+    var refine: ((String, Int, String) -> Int)?
     var position: ((String, Int) -> (page: Int, y: Double)?)?
     var onChange: (() -> Void)?
     var refresh: ((PDFPage) -> Void)?
@@ -121,14 +175,22 @@ final class MarkBook {
     func capture(_ a: PDFAnnotation, quoted: String? = nil) -> Mark? {
         guard let page = a.page, let doc = page.document else { return nil }
         let (x, y) = topLeft(a, page)
-        let probe = NSPoint(x: a.bounds.minX + min(4, a.bounds.width / 2), y: a.bounds.maxY - min(4, a.bounds.height / 2))
+        var probe = NSPoint(x: a.bounds.minX + min(4, a.bounds.width / 2), y: a.bounds.maxY - min(4, a.bounds.height / 2))
+        // A note or text box takes the sentence nearest to it, and its source line from there.
+        var near: String?
+        if Mark.anchored.contains(subtypeName(a)), let t = nearestText(on: page, at: NSPoint(x: a.bounds.midX, y: a.bounds.midY)) {
+            near = t.sentence
+            probe = t.probe
+        }
         let existing = mark(for: a)
-        let src = locate?(page, probe) ?? existing.map { ($0.file, $0.line) } ?? ("", 0)
+        var src = locate?(page, probe) ?? existing.map { ($0.file, $0.line) } ?? ("", 0)
+        if let text = quoted ?? near ?? existing?.context, !text.isEmpty, let better = refine?(src.0, src.1, text) { src.1 = better }
         let anchor = position?(src.0, src.1)?.y ?? y
         var m = existing ?? Mark(id: Mark.newID(), kind: subtypeName(a), quoted: quoted ?? "", comment: "", file: src.0, line: src.1,
                                  page: 0, x: 0, y: 0, w: 0, h: 0, anchorY: anchor, lineWidth: 1, archive: nil, created: Date())
         m.kind = subtypeName(a)
         if let quoted { m.quoted = quoted }
+        if let near { m.anchor = near }
         m.comment = a.contents ?? ""
         m.file = src.0
         m.line = src.1

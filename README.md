@@ -65,6 +65,11 @@ in Preview.
   zoom, rotation, single, continuous or two-page display, print and export.
 - **Source and PDF linked.** Double-click or ⌘-click in the PDF jumps to the LaTeX line;
   ⌘J shows the line at the cursor in the PDF.
+- **Notes carry their sentence.** A note or text box placed without a
+  selection records the sentence of the PDF text nearest to it (also from
+  the margin), shows it in the notes list, and sends it with the mark as
+  `anchor_text`. Its source line is taken from that sentence, skipping the
+  blank and comment lines SyncTeX often lands on between paragraphs.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near
   that line, and other marks move with the line.
