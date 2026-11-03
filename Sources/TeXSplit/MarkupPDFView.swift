@@ -91,6 +91,14 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
     private var notePopover: (popover: NSPopover, annotation: PDFAnnotation, text: NSTextView, before: Data?)?
 
     private var book: MarkBook? { host?.book }
+    /// The previous round's marks, drawn faintly (View › Show Last Round).
+    var lastRound: [GhostMark] = [] {
+        didSet {
+            var seen = Set<ObjectIdentifier>()
+            for g in oldValue + lastRound where g.page.document === document && seen.insert(ObjectIdentifier(g.page)).inserted { annotationsChanged(on: g.page) }
+            needsDisplay = true
+        }
+    }
     var isEditingMark: Bool { textEditor != nil || notePopover != nil }
 
     // MARK: geometry helpers
@@ -163,6 +171,7 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
             context.addPath(CGPath(roundedRect: r, cornerWidth: 2, cornerHeight: 2, transform: nil))
             context.strokePath()
         }
+        for g in lastRound where g.page == page { drawGhost(g, context) }
         if let a = selected, a.page == page {
             let accent = NSColor.controlAccentColor.cgColor
             context.setStrokeColor(accent)
@@ -189,6 +198,45 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
             context.setLineDash(phase: 0, lengths: [4 / scaleFactor, 3 / scaleFactor])
             context.fill(rs.rect)
             context.stroke(rs.rect)
+        }
+    }
+
+    /// A grey outline over the text and a small badge for how it was resolved.
+    private func drawGhost(_ g: GhostMark, _ context: CGContext) {
+        let (symbol, colour): (String, NSColor) = switch g.resolution.status {
+        case "applied": ("✓", .systemGreen)
+        case "declined": ("✕", .systemGray)
+        case "question": ("?", .systemBlue)
+        case "needs-approval": ("!", .systemOrange)
+        default: ("•", .systemGray)
+        }
+        context.saveGState()
+        if g.placed {
+            context.setStrokeColor(NSColor.systemGray.withAlphaComponent(0.55).cgColor)
+            context.setLineWidth(0.8)
+            context.setLineDash(phase: 0, lengths: [2.5, 1.5])
+            context.stroke(g.rect)
+            context.setLineDash(phase: 0, lengths: [])
+        }
+        let badge = g.placed ? NSRect(x: g.rect.maxX + 1, y: g.rect.maxY - 6, width: 10, height: 10) : g.rect
+        context.setFillColor(colour.withAlphaComponent(0.75).cgColor)
+        context.fillEllipse(in: badge)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: context, flipped: false)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: badge.height * 0.7, weight: .bold), .foregroundColor: NSColor.white,
+        ]
+        let size = (symbol as NSString).size(withAttributes: attrs)
+        (symbol as NSString).draw(at: NSPoint(x: badge.midX - size.width / 2, y: badge.midY - size.height / 2), withAttributes: attrs)
+        NSGraphicsContext.restoreGraphicsState()
+        context.restoreGState()
+    }
+
+    /// What the last round did with the mark under a point, for the tooltip.
+    func ghost(at p: NSPoint, on page: PDFPage) -> GhostMark? {
+        lastRound.first { g in
+            g.page == page && (g.rect.insetBy(dx: -2, dy: -2).contains(p)
+                || NSRect(x: g.rect.maxX - 1, y: g.rect.maxY - 8, width: 14, height: 14).contains(p))
         }
     }
 
@@ -245,6 +293,11 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
             let p = convert(vp, to: page)
             if let a = selected, a.page == page, handle(at: p, of: a) != nil { NSCursor.crosshair.set(); return }
             if let a = ownedAnnotation(at: p, on: page), !isTextMarkup(a) { NSCursor.openHand.set(); return }
+            if let g = ghost(at: p, on: page) {
+                let r = g.resolution
+                toolTip = "Last round [\(r.id)] \(r.status)" + (r.action.isEmpty ? "" : ": \(r.action)")
+                    + (r.comment.isEmpty ? "" : "\nYour mark: \(r.comment)") + (g.placed ? "" : "\n(text not found in this build)")
+            } else if toolTip != nil { toolTip = nil }
         }
         super.mouseMoved(with: event)
     }
@@ -293,6 +346,9 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
             }
             selected = nil
             super.mouseDown(with: event)
+            // Double-click on the text jumps to its LaTeX line, as in Overleaf.
+            // The word stays selected, so a double-click can still start a mark.
+            if event.clickCount == 2 { host?.commandClick(page: page, point: p) }
         case .rectSelect:
             rectSelection = nil
             drag = .rect(start: p)
@@ -715,6 +771,24 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
         }
         refresh(a.page)
         window?.makeFirstResponder(self)
+    }
+
+    /// Finish any text box or note being typed into, so its text is in the marks file.
+    func commitMarkEditing() {
+        endTextEditing()
+        if let (pop, a, tv, before) = notePopover {
+            notePopover = nil
+            pop.close()
+            if subtypeName(a) == "Text" && tv.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                book?.remove(a)
+                if selected === a { selected = nil }
+            } else if tv.string != (a.contents ?? "") {
+                a.contents = tv.string
+                a.modificationDate = Date()
+                book?.changed(a, before: before)
+            }
+            refresh(a.page)
+        }
     }
 
     /// A note opens as Preview's yellow note: author and date on top, the text below.

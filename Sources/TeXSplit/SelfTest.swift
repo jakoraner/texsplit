@@ -35,6 +35,7 @@ extension ChapterWindow {
         let note = PDFAnnotation(bounds: NSRect(x: 548, y: h - 236, width: 20, height: 20), forType: .text, withProperties: nil)
         note.iconType = .comment; note.color = Palette.note; note.contents = "Self-test note"
         book.add(note, to: page)
+        log("note next to: \(book.mark(for: note)?.anchor ?? "(none)") @ line \(book.mark(for: note)?.line ?? 0)")
         log("marks: \(before) -> \(book.marks.count)")
         let kinds = book.marks.map(\.kind).joined(separator: ",")
         log("kinds: \(kinds)")

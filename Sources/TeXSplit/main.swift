@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if windows.isEmpty { openDocument(nil) }
         }
         NSApp.activate(ignoringOtherApps: true)
+        // Switching to another app saves every window, as Preview does.
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.windows.forEach { $0.flushEdits() }
+        }
     }
 
     func application(_ sender: NSApplication, open urls: [URL]) {
@@ -35,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         remember()
         terminating = true
         for w in windows {
+            w.flushEdits()
             guard let win = w.window, win.isDocumentEdited else { continue }
             win.makeKeyAndOrderFront(nil)
             if !w.windowShouldClose(win) { terminating = false; return .terminateCancel }
@@ -151,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chapters,
             .separator(),
             item("Close", #selector(NSWindow.performClose(_:)), "w"),
-            item("Save and Build", #selector(ChapterWindow.saveDocument(_:)), "s"),
+            item("Save and Build Now", #selector(ChapterWindow.saveDocument(_:)), "s"),
             item("Build Again", #selector(ChapterWindow.rebuildNow(_:)), "b"),
             .separator(),
             item("Export as PDF…", #selector(ChapterWindow.exportPDF(_:)), ""),
@@ -170,6 +175,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .separator(),
             { let f = item("Find…", #selector(NSTextView.performFindPanelAction(_:)), "f"); f.tag = Int(NSFindPanelAction.showFindPanel.rawValue); return f }(),
             { let f = item("Find Next", #selector(NSTextView.performFindPanelAction(_:)), "g"); f.tag = Int(NSFindPanelAction.next.rawValue); return f }(),
+            .separator(),
+            item("Lock Paragraph", #selector(ChapterWindow.lockParagraph(_:)), "l", [.command, .option]),
+            item("Unlock Paragraph", #selector(ChapterWindow.unlockParagraph(_:)), "l", [.command, .option, .shift]),
         ])
         let ctrlCmd: NSEvent.ModifierFlags = [.command, .control]
         let optCmd: NSEvent.ModifierFlags = [.command, .option]
@@ -189,6 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item("Show Markup Toolbar", #selector(ChapterWindow.toggleMarkupToolbar(_:)), "a", [.command, .shift]),
             item("Show Line in PDF", #selector(ChapterWindow.showInPDF(_:)), "j"),
             item("Live Preview", #selector(ChapterWindow.toggleLivePreview(_:)), "l", [.command, .shift]),
+            item("Show Last Round", #selector(ChapterWindow.toggleLastRound(_:)), "r", [.command, .option]),
             .separator(),
             item("Continuous Scroll", #selector(ChapterWindow.displayContinuous(_:)), ""),
             item("Single Page", #selector(ChapterWindow.displaySingle(_:)), ""),

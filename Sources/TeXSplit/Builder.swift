@@ -60,7 +60,11 @@ final class Builder {
 
         if jobName != "main" {
             let seed = Seed(aux: fullDir.appendingPathComponent("main.aux"), source: thesisRoot.appendingPathComponent(rel))
-            try? (seed?.labels ?? "").write(to: buildDir.appendingPathComponent("texsplit-labels.tex"), atomically: true, encoding: .utf8)
+            // One labels file per chapter: every window of a project shares buildDir, and each
+            // chapter leaves its own labels out, so a shared file let the last writer's gap
+            // (e.g. every Results label) show up as ?? in all the other chapters.
+            let labelsFile = "texsplit-labels-\(jobName).tex"
+            try? (seed?.labels ?? "").write(to: buildDir.appendingPathComponent(labelsFile), atomically: true, encoding: .utf8)
             let main = (try? String(contentsOf: buildDir.appendingPathComponent("main.tex"), encoding: .utf8)) ?? ""
             let wrapped = main.components(separatedBy: "\n").map { line -> String in
                 guard let r = line.range(of: #"\\input\{(Chapters|Backmatter|Frontmatter)/[^}]+\}"#, options: .regularExpression)
@@ -70,7 +74,7 @@ final class Builder {
                 return (seed?.counters ?? "") + line
             }.joined(separator: "\n")
             .replacingOccurrences(of: "\\begin{document}",
-                                  with: "\\makeatletter\\input{texsplit-labels.tex}\\makeatother\n\\begin{document}", options: [], range: nil)
+                                  with: "\\makeatletter\\input{\(labelsFile)}\\makeatother\n\\begin{document}", options: [], range: nil)
             // Live passes leave out what only the full build needs: the contents and
             // the lists of figures and tables before the chapter, the bibliography after it.
             // The chapter's own pages are numbered by \setcounter{page} just before it.
