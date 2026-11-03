@@ -140,6 +140,88 @@ struct MarkStore {
     }
 }
 
+/// One mark of the previous review round as the thesis repo resolved it:
+/// `render/review/live/archive/<chapter>-resolutions-vN-*.json`.
+struct Resolution {
+    let id: String
+    let page: Int
+    let quoted: String
+    let comment: String
+    let status: String        // applied, declined, question, needs-approval
+    let action: String
+    let newText: String
+
+    /// The newest round for a chapter: highest N, then the most recently written.
+    static func latestFile(in archive: URL, stem: String) -> URL? {
+        let prefix = "\(stem)-resolutions-v"
+        let files = (try? FileManager.default.contentsOfDirectory(at: archive, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        func version(_ u: URL) -> Int {
+            Int(u.lastPathComponent.dropFirst(prefix.count).prefix { $0.isNumber }) ?? -1
+        }
+        func date(_ u: URL) -> Date { (try? u.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast }
+        return files.filter { $0.lastPathComponent.hasPrefix(prefix) && $0.pathExtension == "json" && version($0) >= 0 }
+            .max { (version($0), date($0)) < (version($1), date($1)) }
+    }
+
+    /// Lenient: unknown keys are ignored, missing ones are empty, `page` may be a number or a string.
+    static func load(_ url: URL) -> [Resolution] {
+        guard let data = try? Data(contentsOf: url),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+        func str(_ r: [String: Any], _ k: String) -> String {
+            if let s = r[k] as? String { return s }
+            if let n = r[k] as? NSNumber { return n.stringValue }
+            return ""
+        }
+        return rows.map { r in
+            Resolution(id: str(r, "id"), page: Int(str(r, "page")) ?? 0, quoted: str(r, "quoted"), comment: str(r, "comment"),
+                       status: str(r, "status").lowercased(), action: str(r, "action"), newText: str(r, "new_text"))
+        }
+    }
+
+    /// Where it is drawn in this build: over its new text if found (else its old text),
+    /// otherwise in the right margin of its original page.
+    static func place(_ list: [Resolution], on doc: PDFDocument) -> [GhostMark] {
+        var stacked: [Int: Int] = [:]
+        return list.compactMap { r in
+            let original = max(0, min(doc.pageCount - 1, r.page - 1))
+            for text in [r.newText, r.quoted] {
+                if let sel = find(text, in: doc, near: original), let page = sel.pages.first {
+                    return GhostMark(resolution: r, page: page, rect: sel.bounds(for: page).insetBy(dx: -2, dy: -1.5), placed: true)
+                }
+            }
+            guard doc.pageCount > 0, let page = doc.page(at: original) else { return nil }
+            let box = page.bounds(for: .mediaBox)
+            let k = stacked[original, default: 0]
+            stacked[original] = k + 1
+            return GhostMark(resolution: r, page: page, rect: NSRect(x: box.maxX - 46, y: box.maxY - 70 - CGFloat(k) * 18, width: 14, height: 14), placed: false)
+        }
+    }
+
+    /// The text, or failing that its first eight words (line breaks and hyphens
+    /// differ between source and PDF), the hit nearest the original page.
+    private static func find(_ text: String, in doc: PDFDocument, near page: Int) -> PDFSelection? {
+        let words = text.split(whereSeparator: \.isWhitespace)
+        guard words.count >= 2 || text.count >= 12 else { return nil }
+        for probe in [words.joined(separator: " "), words.prefix(8).joined(separator: " ")] where probe.count >= 8 {
+            let hits = doc.findString(probe, withOptions: [.caseInsensitive])
+            if let best = hits.min(by: { distance($0, doc, page) < distance($1, doc, page) }) { return best }
+        }
+        return nil
+    }
+
+    private static func distance(_ s: PDFSelection, _ doc: PDFDocument, _ page: Int) -> Int {
+        s.pages.first.map { abs(doc.index(for: $0) - page) } ?? .max
+    }
+}
+
+struct GhostMark {
+    let resolution: Resolution
+    let page: PDFPage
+    let rect: NSRect
+    /// False when its text was not found and it sits in the margin of its old page.
+    let placed: Bool
+}
+
 /// The marks of one window: which annotations are ours, keeping the saved list
 /// in step with them, putting them back after a rebuild, and undo.
 final class MarkBook {
@@ -332,4 +414,5 @@ final class MarkBook {
     }
 
     var storeDir: URL { store.dir }
+    var stem: String { store.stem }
 }

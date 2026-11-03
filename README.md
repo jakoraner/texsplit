@@ -81,6 +81,14 @@ in Preview.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near
   that line, and other marks move with the line.
+- **The last round, faintly.** When the agent has answered a round of
+  marks with `render/review/live/archive/<chapter>-resolutions-vN-*.json`
+  (a list of `id`, `page`, `quoted`, `comment`, `status`, `action`,
+  `new_text`), View › Show Last Round (⌥⌘R) draws those marks in grey over
+  their new text, each with a badge: ✓ applied, ✕ declined, ? question,
+  ! needs approval. Hovering shows what was done. A mark whose text is not
+  found sits in the margin of its old page. The newest round (highest N) is
+  used; without such a file the item is disabled.
 - **A review queue for later.** "Send Marks to Review Queue" (⇧⌘E) writes
   every mark with its source file and line, as JSON and Markdown, plus a
   marked copy of the PDF, so a person or a script can work through them.

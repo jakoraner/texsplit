@@ -305,6 +305,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         case #selector(showPDFOnly(_:)): item.state = layout == .pdf ? .on : .off
         case #selector(deleteMark(_:)): return pdfView.selected != nil
         case #selector(toggleLivePreview(_:)): item.state = Self.livePreview ? .on : .off
+        case #selector(toggleLastRound(_:)):
+            item.state = showLastRound ? .on : .off
+            return showLastRound || lastRoundFile != nil
         case #selector(sidebarBookmarks(_:)): item.state = pane.sidebarMode == .bookmarks ? .on : .off
         case #selector(contactSheet(_:)): item.state = pane.sidebarMode == .contactSheet ? .on : .off
         case #selector(addBookmark(_:)): item.title = pane.currentPageBookmarked ? "Remove Bookmark" : "Add Bookmark"
@@ -425,6 +428,32 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
                 else { self.diskDate = self.modDate(); self.autosave() }
             }
         }
+    }
+
+    // MARK: Last round
+
+    private var showLastRound = false
+    private var lastRoundFile: URL? {
+        Resolution.latestFile(in: book.storeDir.appendingPathComponent("archive", isDirectory: true), stem: book.stem)
+    }
+
+    /// View › Show Last Round: the previous round's marks, faint, where their new text is.
+    @objc func toggleLastRound(_ sender: Any?) {
+        showLastRound.toggle()
+        if showLastRound { ensurePDF() }
+        placeLastRound()
+        if showLastRound, let url = lastRoundFile {
+            let found = pdfView.lastRound.filter(\.placed).count
+            setStatus("Last round (\(url.lastPathComponent)): \(pdfView.lastRound.count) mark(s), \(found) found in the text")
+        }
+    }
+
+    private func placeLastRound() {
+        guard showLastRound, let doc = pdfView.document, let url = lastRoundFile else {
+            if !pdfView.lastRound.isEmpty { pdfView.lastRound = [] }
+            return
+        }
+        pdfView.lastRound = Resolution.place(Resolution.load(url), on: doc)
     }
 
     // MARK: Locked paragraphs
@@ -680,6 +709,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         }
         if pane.rotation != 0 { pane.applyRotation() }
         book.place(on: doc)
+        placeLastRound()
         if let id = selectedID { pdfView.selected = book.annotation(for: id) }
         pane.documentChanged()
         if let t0 = liveTestStart, let doc = pdfView.document, !doc.findString("Livepreviewcheck\(liveRound)", withOptions: []).isEmpty {
