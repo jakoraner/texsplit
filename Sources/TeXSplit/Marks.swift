@@ -222,6 +222,70 @@ struct GhostMark {
     let placed: Bool
 }
 
+/// A document's text as marks are matched against it: no whitespace and no hyphens,
+/// ligatures spelled out. A highlight's quote keeps the line breaks and hyphenation of
+/// the build it was made on ("split-latent per- mutation"), and PDFKit's findString
+/// does not match a space against a line break, so an exact search lost every
+/// highlight over more than one line at the next rebuild. Squeezed, the quote is found
+/// whatever the new build's line breaks are.
+struct SqueezedText {
+    private let text: NSString
+    private let map: [(page: Int, index: Int)]   // per squeezed UTF-16 unit: where it came from
+
+    private static let skipped: Set<unichar> = [0x2D, 0xAD, 0x2010, 0x2011]   // hyphen, soft hyphen, Unicode hyphens
+    private static let ligatures: [unichar: String] = [0xFB00: "ff", 0xFB01: "fi", 0xFB02: "fl", 0xFB03: "ffi", 0xFB04: "ffl", 0xFB05: "st", 0xFB06: "st"]
+
+    private static func squeeze(_ s: NSString, page: Int, into units: inout [unichar], map: inout [(page: Int, index: Int)]) {
+        let space = CharacterSet.whitespacesAndNewlines
+        for i in 0..<s.length {
+            let c = s.character(at: i)
+            if skipped.contains(c) { continue }
+            if let scalar = Unicode.Scalar(c), space.contains(scalar) { continue }
+            if let l = ligatures[c] {
+                for u in l.utf16 { units.append(u); map.append((page, i)) }
+            } else {
+                units.append(c)
+                map.append((page, i))
+            }
+        }
+    }
+
+    static func squeeze(_ s: String) -> String {
+        var units: [unichar] = [], map: [(page: Int, index: Int)] = []
+        squeeze(s as NSString, page: 0, into: &units, map: &map)
+        return String(utf16CodeUnits: units, count: units.count)
+    }
+
+    init(_ doc: PDFDocument) {
+        var units: [unichar] = [], map: [(page: Int, index: Int)] = []
+        for p in 0..<doc.pageCount {
+            Self.squeeze((doc.page(at: p)?.string ?? "") as NSString, page: p, into: &units, map: &map)
+        }
+        text = String(utf16CodeUnits: units, count: units.count) as NSString
+        self.map = map
+    }
+
+    /// Every place the quote occurs, as selections in the document (at most 50).
+    func find(_ quoted: String, in doc: PDFDocument) -> [PDFSelection] {
+        let q = Self.squeeze(quoted)
+        guard !q.isEmpty else { return [] }
+        var out: [PDFSelection] = []
+        var from = 0
+        while from < text.length, out.count < 50 {
+            let r = text.range(of: q, options: .literal, range: NSRange(location: from, length: text.length - from))
+            guard r.location != NSNotFound else { break }
+            from = r.location + 1
+            let a = map[r.location], b = map[NSMaxRange(r) - 1]
+            guard let pa = doc.page(at: a.page), let pb = doc.page(at: b.page) else { continue }
+            let sel = a.page == b.page
+                ? pa.selection(for: NSRange(location: a.index, length: b.index - a.index + 1))
+                : doc.selection(from: pa, atCharacterIndex: a.index, to: pb, atCharacterIndex: b.index)
+            if let sel { out.append(sel) }
+        }
+        return out
+    }
+}
+
 /// The marks of one window: which annotations are ours, keeping the saved list
 /// in step with them, putting them back after a rebuild, and undo.
 final class MarkBook {
@@ -342,18 +406,28 @@ final class MarkBook {
 
     // MARK: after a rebuild
 
-    /// Draw every mark on a freshly built document.
+    /// Text markups that were not found in the last build's text and sit where they were.
+    private(set) var unfound = 0
+
+    /// Draw every mark on a freshly built document. A text markup goes over its text
+    /// wherever the new build put it; if that text is gone it stays visible at its old
+    /// place beside its source line. No mark is ever dropped here.
     func place(on doc: PDFDocument) {
+        // Placing twice on one document must not draw everything twice.
+        for a in annotationOf.values { a.page?.removeAnnotation(a) }
         idOf.removeAll()
         annotationOf.removeAll()
+        unfound = 0
         let author = NSFullUserName()
+        var text: SqueezedText?
         for i in marks.indices {
             var m = marks[i]
             let expected = position?(m.file, m.line) ?? (m.page, m.anchorY)
             let stored = m.archive.flatMap { try? NSKeyedUnarchiver.unarchiveTopLevelObjectWithData($0) as? PDFAnnotation }
             var placed: PDFAnnotation?
             if m.isTextMarkup {
-                let hits = doc.findString(m.quoted, withOptions: [])
+                if text == nil { text = SqueezedText(doc) }
+                let hits = text!.find(m.quoted, in: doc)
                 let best = hits.min { a, b in Self.distance(a, doc, expected) < Self.distance(b, doc, expected) }
                 if let sel = best, let page = sel.pages.first {
                     let a = Self.markup(kind: m.kind, selection: sel, page: page, color: stored?.color ?? .systemYellow)
@@ -361,15 +435,20 @@ final class MarkBook {
                     a.userName = author
                     page.addAnnotation(a)
                     placed = a
+                } else {
+                    unfound += 1
                 }
-            } else if let a = stored, let page = doc.page(at: max(0, min(doc.pageCount - 1, expected.page - 1))) {
+            }
+            if placed == nil, let a = stored, let page = doc.page(at: max(0, min(doc.pageCount - 1, expected.page - 1))) {
                 // Keep the mark's offset from its anchor line.
                 let top = expected.y + (m.y - m.anchorY)
                 let height = page.bounds(for: .mediaBox).height
                 a.bounds = NSRect(x: m.x, y: Double(height) - top - m.h, width: m.w, height: m.h)
-                let b = PDFBorder()
-                b.lineWidth = CGFloat(m.lineWidth)
-                a.border = b
+                if !m.isTextMarkup {
+                    let b = PDFBorder()
+                    b.lineWidth = CGFloat(m.lineWidth)
+                    a.border = b
+                }
                 page.addAnnotation(a)
                 placed = a
             }

@@ -688,6 +688,8 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     @objc func refreshWholeThesis(_ sender: Any?) { refreshFullIfStale(force: true) }
 
+    private var lastUnfound = 0
+
     /// Load the new PDF where the old one was being read, then put the marks back.
     private func showPDF() {
         guard let data = try? Data(contentsOf: builder.pdfURL), let doc = PDFDocument(data: data) else { return }
@@ -709,6 +711,10 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         }
         if pane.rotation != 0 { pane.applyRotation() }
         book.place(on: doc)
+        if book.unfound > 0 && book.unfound != lastUnfound {
+            showNotice("\(book.unfound) highlight(s) not found in the new text: shown where they were")
+        }
+        lastUnfound = book.unfound
         placeLastRound()
         if let id = selectedID { pdfView.selected = book.annotation(for: id) }
         pane.documentChanged()

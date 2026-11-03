@@ -80,7 +80,8 @@ in Preview.
   says in the status bar that the change will need approval.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near
-  that line, and other marks move with the line.
+  that line, whatever the new line breaks and hyphenation, and other marks
+  move with the line.
 - **The last round, faintly.** When the agent has answered a round of
   marks with `render/review/live/archive/<chapter>-resolutions-vN-*.json`
   (a list of `id`, `page`, `quoted`, `comment`, `status`, `action`,
@@ -136,8 +137,9 @@ If your project is laid out differently, these are the places to change:
 - No inspector panel, cropping or form filling.
 - Signatures are kept by TeX Split (Application Support/TeX Split), not
   shared with Preview's own.
-- Text that moves a lot between builds can leave a highlight behind; it is
-  then kept in the list but not drawn until its text is found again.
+- A highlight whose text was rewritten is not found again. It is kept and
+  drawn where it was, beside its source line, and the status bar says how
+  many such highlights there are.
 
 ## Contributing
 
