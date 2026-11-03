@@ -55,7 +55,7 @@ in Preview.
 - **Preview's sidebar and navigation.** Thumbnails, table of contents,
   highlights and notes, bookmarks (⌘D), contact sheet, search (⌥⌘F),
   zoom, rotation, single, continuous or two-page display, print and export.
-- **Source and PDF linked.** ⌘-click in the PDF jumps to the LaTeX line;
+- **Source and PDF linked.** Double-click or ⌘-click in the PDF jumps to the LaTeX line;
   ⌘J shows the line at the cursor in the PDF.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near

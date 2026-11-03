@@ -293,6 +293,9 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
             }
             selected = nil
             super.mouseDown(with: event)
+            // Double-click on the text jumps to its LaTeX line, as in Overleaf.
+            // The word stays selected, so a double-click can still start a mark.
+            if event.clickCount == 2 { host?.commandClick(page: page, point: p) }
         case .rectSelect:
             rectSelection = nil
             drag = .rect(start: p)
