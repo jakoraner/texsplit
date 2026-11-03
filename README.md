@@ -22,11 +22,13 @@ in Preview.
 1. The agent works in the repository: branches, commits, checks.
 2. You read a chapter as a PDF and mark it up: highlights, notes, shapes.
 3. What you want to change yourself, you change in the source beside it.
-   The PDF follows as you type, a few seconds behind.
+   The PDF follows as you type, a few seconds behind, and the file saves
+   itself two seconds after you stop typing.
 4. ⇧⌘E sends the remaining marks to `render/review/live/`, each with its file
    and line, and the agent works through them.
-5. When the agent saves a file you have open, the window reloads. If you have
-   unsaved edits it asks first, so your own writing is never overwritten.
+5. When the agent saves a file you have open, the window reloads. If you
+   typed in the same file within the last two seconds it asks first, so
+   neither your writing nor the agent's is overwritten.
 
 ## What it does
 
@@ -35,10 +37,16 @@ in Preview.
   PDF only.
 - **Live preview.** About a second after you stop typing, the chapter is
   rebuilt from the text on screen and the PDF updates, roughly 5 seconds
-  from keystroke to page. Your file on disk only changes when you save, so
-  an agent never sees half-typed text. View › Live Preview (⇧⌘L) turns it
-  off; while the LaTeX does not compile, the last good PDF stays.
-- **Fast chapter builds.** Saving (⌘S) rebuilds only that chapter, with
+  from keystroke to page. View › Live Preview (⇧⌘L) turns it off; while
+  the LaTeX does not compile, the last good PDF stays.
+- **Saves itself, as Preview does.** The LaTeX is written to disk two
+  seconds after the last keystroke, and at once when you switch window or
+  app, close or quit; no ⌘S needed. A full build follows after a longer
+  pause, so typing in bursts does not queue build after build. If an agent
+  changed the file on disk in the meantime, nothing is written and you are
+  asked which version to keep. Marks are written to their file on every
+  add, change and delete; an open note is saved when you leave the app.
+- **Fast chapter builds.** ⌘S saves and rebuilds that chapter at once, with
   [Tectonic](https://tectonic-typesetting.github.io/) and SyncTeX, in
   seconds instead of a minute for the whole document.
 - **Numbered as the whole document.** One build of the whole document runs
@@ -64,7 +72,8 @@ in Preview.
   every mark with its source file and line, as JSON and Markdown, plus a
   marked copy of the PDF, so a person or a script can work through them.
 - **Safe beside other editors.** If another program saves a file you have
-  open, an unedited window reloads; a window with unsaved edits asks first.
+  open, a window without unsaved edits reloads quietly; one with unsaved
+  edits (typed in the last two seconds) asks first.
 
 ## Requirements
 

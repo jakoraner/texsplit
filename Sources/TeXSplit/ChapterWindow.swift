@@ -312,17 +312,77 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
     }
 
+    /// ⌘S: save now and build at once.
     @objc func saveDocument(_ sender: Any?) {
+        if write() { fullBuildWork?.cancel(); rebuild() }
+    }
+
+    /// Write the buffer to disk. Returns false if it could not be written.
+    @discardableResult
+    private func write() -> Bool {
+        autosaveWork?.cancel()
         do {
             try editor.text.write(to: fileURL, atomically: true, encoding: .utf8)
             diskDate = modDate()
             askedAboutDisk = false
             window?.isDocumentEdited = false
-            rebuild()
+            return true
         } catch {
             setStatus("Could not save: \(error.localizedDescription)", error: true)
+            return false
         }
     }
+
+    // MARK: Auto-save, as in Preview
+
+    private var autosaveWork: DispatchWorkItem?
+    private var fullBuildWork: DispatchWorkItem?
+    private static let autosaveDelay = 2.0
+    /// The full build after an auto-save waits for a longer pause when live preview
+    /// already shows the text, so typing in bursts does not queue build after build.
+    private static let fullBuildDelay = 8.0
+
+    private func scheduleAutosave() {
+        // The live-preview test types into a real chapter; that must never reach the disk.
+        guard ProcessInfo.processInfo.environment["TEXSPLIT_LIVETEST"] == nil else { return }
+        autosaveWork?.cancel()
+        fullBuildWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.autosave() }
+        autosaveWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autosaveDelay, execute: w)
+    }
+
+    /// Save an edited buffer unless the file changed on disk since it was loaded:
+    /// then nothing is written and the usual question is asked. Returns true when
+    /// the buffer is (now) the same as the file.
+    @discardableResult
+    func autosave() -> Bool {
+        autosaveWork?.cancel()
+        guard window?.isDocumentEdited == true else { return true }
+        if let d = modDate(), let known = diskDate, d > known {
+            checkDisk()
+            return false
+        }
+        guard write() else { return false }
+        fullBuildWork?.cancel()
+        if Self.livePreview {
+            let w = DispatchWorkItem { [weak self] in self?.rebuild() }
+            fullBuildWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fullBuildDelay, execute: w)
+        } else {
+            rebuild()
+        }
+        return true
+    }
+
+    /// Leaving the window or the app saves at once, and closes an open note or text box.
+    func flushEdits() {
+        pdfView.commitMarkEditing()
+        autosave()
+    }
+
+    /// Not the marks here: a note's own popover takes key status when it opens.
+    func windowDidResignKey(_ notification: Notification) { autosave() }
 
     @objc func rebuildNow(_ sender: Any?) { rebuild() }
 
@@ -346,7 +406,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
             a.addButton(withTitle: "Load Disk Version")
             a.beginSheetModal(for: window!) { r in
                 if r == .alertSecondButtonReturn { self.load(); self.rebuild() }
-                else { self.diskDate = self.modDate() }
+                else { self.diskDate = self.modDate(); self.autosave() }
             }
         }
     }
@@ -355,6 +415,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         window?.isDocumentEdited = true
         editor.scheduleRecolour()
         scheduleLiveBuild()
+        scheduleAutosave()
     }
 
     // MARK: Live preview
@@ -381,7 +442,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        pdfView.endTextEditing()
+        pdfView.commitMarkEditing()
+        // Auto-save first; only a file that also changed on disk still asks.
+        if sender.isDocumentEdited, autosave() { return true }
         guard sender.isDocumentEdited else { return true }
         let a = NSAlert()
         a.messageText = "Save changes to \(sender.title)?"
@@ -397,6 +460,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     func windowWillClose(_ notification: Notification) {
         watcher?.invalidate()
+        autosaveWork?.cancel()
+        fullBuildWork?.cancel()
+        liveWork?.cancel()
         (NSApp.delegate as? AppDelegate)?.closed(self)
     }
 

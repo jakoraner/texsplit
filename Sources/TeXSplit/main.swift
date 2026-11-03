@@ -19,6 +19,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if windows.isEmpty { openDocument(nil) }
         }
         NSApp.activate(ignoringOtherApps: true)
+        // Switching to another app saves every window, as Preview does.
+        NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.windows.forEach { $0.flushEdits() }
+        }
     }
 
     func application(_ sender: NSApplication, open urls: [URL]) {
@@ -35,6 +39,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         remember()
         terminating = true
         for w in windows {
+            w.flushEdits()
             guard let win = w.window, win.isDocumentEdited else { continue }
             win.makeKeyAndOrderFront(nil)
             if !w.windowShouldClose(win) { terminating = false; return .terminateCancel }
@@ -151,7 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chapters,
             .separator(),
             item("Close", #selector(NSWindow.performClose(_:)), "w"),
-            item("Save and Build", #selector(ChapterWindow.saveDocument(_:)), "s"),
+            item("Save and Build Now", #selector(ChapterWindow.saveDocument(_:)), "s"),
             item("Build Again", #selector(ChapterWindow.rebuildNow(_:)), "b"),
             .separator(),
             item("Export as PDF…", #selector(ChapterWindow.exportPDF(_:)), ""),

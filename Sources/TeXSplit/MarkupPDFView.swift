@@ -720,6 +720,24 @@ final class MarkupPDFView: PDFView, NSTextViewDelegate, NSPopoverDelegate {
         window?.makeFirstResponder(self)
     }
 
+    /// Finish any text box or note being typed into, so its text is in the marks file.
+    func commitMarkEditing() {
+        endTextEditing()
+        if let (pop, a, tv, before) = notePopover {
+            notePopover = nil
+            pop.close()
+            if subtypeName(a) == "Text" && tv.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                book?.remove(a)
+                if selected === a { selected = nil }
+            } else if tv.string != (a.contents ?? "") {
+                a.contents = tv.string
+                a.modificationDate = Date()
+                book?.changed(a, before: before)
+            }
+            refresh(a.page)
+        }
+    }
+
     /// A note opens as Preview's yellow note: author and date on top, the text below.
     func editNote(_ a: PDFAnnotation) {
         guard let page = a.page else { return }
