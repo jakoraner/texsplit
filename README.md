@@ -22,11 +22,13 @@ in Preview.
 1. The agent works in the repository: branches, commits, checks.
 2. You read a chapter as a PDF and mark it up: highlights, notes, shapes.
 3. What you want to change yourself, you change in the source beside it.
-   The PDF follows as you type, a few seconds behind.
+   The PDF follows as you type, a few seconds behind, and the file saves
+   itself two seconds after you stop typing.
 4. ⇧⌘E sends the remaining marks to `render/review/live/`, each with its file
    and line, and the agent works through them.
-5. When the agent saves a file you have open, the window reloads. If you have
-   unsaved edits it asks first, so your own writing is never overwritten.
+5. When the agent saves a file you have open, the window reloads. If you
+   typed in the same file within the last two seconds it asks first, so
+   neither your writing nor the agent's is overwritten.
 
 ## What it does
 
@@ -35,10 +37,16 @@ in Preview.
   PDF only.
 - **Live preview.** About a second after you stop typing, the chapter is
   rebuilt from the text on screen and the PDF updates, roughly 5 seconds
-  from keystroke to page. Your file on disk only changes when you save, so
-  an agent never sees half-typed text. View › Live Preview (⇧⌘L) turns it
-  off; while the LaTeX does not compile, the last good PDF stays.
-- **Fast chapter builds.** Saving (⌘S) rebuilds only that chapter, with
+  from keystroke to page. View › Live Preview (⇧⌘L) turns it off; while
+  the LaTeX does not compile, the last good PDF stays.
+- **Saves itself, as Preview does.** The LaTeX is written to disk two
+  seconds after the last keystroke, and at once when you switch window or
+  app, close or quit; no ⌘S needed. A full build follows after a longer
+  pause, so typing in bursts does not queue build after build. If an agent
+  changed the file on disk in the meantime, nothing is written and you are
+  asked which version to keep. Marks are written to their file on every
+  add, change and delete; an open note is saved when you leave the app.
+- **Fast chapter builds.** ⌘S saves and rebuilds that chapter at once, with
   [Tectonic](https://tectonic-typesetting.github.io/) and SyncTeX, in
   seconds instead of a minute for the whole document.
 - **Numbered as the whole document.** One build of the whole document runs
@@ -55,16 +63,54 @@ in Preview.
 - **Preview's sidebar and navigation.** Thumbnails, table of contents,
   highlights and notes, bookmarks (⌘D), contact sheet, search (⌥⌘F),
   zoom, rotation, single, continuous or two-page display, print and export.
-- **Source and PDF linked.** ⌘-click in the PDF jumps to the LaTeX line;
+- **Source and PDF linked.** Double-click or ⌘-click in the PDF jumps to the LaTeX line;
   ⌘J shows the line at the cursor in the PDF.
+- **Notes carry their sentence.** A note or text box placed without a
+  selection records the sentence of the PDF text nearest to it (also from
+  the margin), shows it in the notes list, and sends it with the mark as
+  `anchor_text`. Its source line is taken from that sentence, skipping the
+  blank and comment lines SyncTeX often lands on between paragraphs.
+- **Locked paragraphs.** Paragraphs you have signed off sit between
+  `% LOCKED <id> <YYYY-MM-DD>` and `% END LOCKED` and are shaded in the
+  editor. Edit › Lock Paragraph (⌥⌘L) wraps the paragraph at the cursor, or
+  every paragraph the selection touches, with an id made of the chapter and
+  its first words (`rw-keyworks`) and today's date; Unlock Paragraph (⇧⌥⌘L)
+  removes the markers around the cursor. Both can be undone. Editing inside
+  a locked paragraph is allowed; the first edit per paragraph and session
+  says in the status bar that the change will need approval.
 - **Marks survive rebuilds.** Every mark is anchored to the source line
   under it. After a rebuild, highlights are found again by their text near
-  that line, and other marks move with the line.
+  that line, whatever the new line breaks and hyphenation, and other marks
+  move with the line.
+- **The last round, faintly.** When the agent has answered a round of
+  marks with `render/review/live/archive/<chapter>-resolutions-vN-*.json`
+  (a list of `id`, `page`, `quoted`, `comment`, `status`, `action`,
+  `new_text`), View › Show Last Round (⌥⌘R) draws those marks in grey over
+  their new text, each with a badge: ✓ applied, ✕ declined, ? question,
+  ! needs approval. Hovering shows what was done. A mark whose text is not
+  found sits in the margin of its old page. The newest round (highest N) is
+  used; without such a file the item is disabled.
 - **A review queue for later.** "Send Marks to Review Queue" (⇧⌘E) writes
   every mark with its source file and line, as JSON and Markdown, plus a
   marked copy of the PDF, so a person or a script can work through them.
 - **Safe beside other editors.** If another program saves a file you have
-  open, an unedited window reloads; a window with unsaved edits asks first.
+  open, a window without unsaved edits reloads quietly; one with unsaved
+  edits (typed in the last two seconds) asks first.
+- **Marks are never lost to a save.** Before the marks file
+  (`render/review/live/<chapter>-marks.json`) is overwritten, its previous
+  content is copied to `render/review/live/history/<chapter>-<yyyyMMdd-HHmmss>.json`
+  (the last 200 per chapter; empty lists are not kept). A save never leaves
+  out a mark the window has held unless you deleted it (Delete, Cut, or
+  undoing its Add); anything else is put back and logged to stderr. If
+  another program, or another window on the same chapter, changed the marks
+  file, its marks are merged in by id instead of being overwritten, and the
+  window picks the change up within two seconds.
+- **Archiving a round while the app runs.** To start a new round, copy the
+  marks file to `render/review/live/archive/` and write `[]` to it. An empty
+  list written after the app's last save is taken as that reset: the window
+  drops the marks made before it and does not write them back. Marks made
+  after the reset are kept. Quitting the app first still works, and is the
+  safest way when a note is open.
 
 ## Requirements
 
@@ -106,8 +152,9 @@ If your project is laid out differently, these are the places to change:
 - No inspector panel, cropping or form filling.
 - Signatures are kept by TeX Split (Application Support/TeX Split), not
   shared with Preview's own.
-- Text that moves a lot between builds can leave a highlight behind; it is
-  then kept in the list but not drawn until its text is found again.
+- A highlight whose text was rewritten is not found again. It is kept and
+  drawn where it was, beside its source line, and the status bar says how
+  many such highlights there are.
 
 ## Contributing
 

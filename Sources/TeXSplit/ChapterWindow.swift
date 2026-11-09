@@ -61,7 +61,10 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         editor.textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
         if FileManager.default.fileExists(atPath: builder.pdfURL.path) { showPDF() }
         rebuild()
-        watcher = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in self?.checkDisk() }
+        watcher = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.checkMarksFile()
+            self?.checkDisk()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
@@ -104,6 +107,7 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
             return url
         }
         book.locate = { [weak self] page, point in self?.sourceLine(page: page, point: point) }
+        book.refine = { [weak self] file, line, text in self?.textLine(file: file, near: line, text: text) ?? line }
         book.position = { [weak self] file, line in
             guard let pos = self?.sync?.position(rel: file, line: line) else { return nil }
             return (pos.page, pos.y)
@@ -175,14 +179,29 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     @objc func pdfZoomFit(_ sender: Any?) { pdfView.autoScales = true }
     @objc func pdfActualSize(_ sender: Any?) { pdfView.scaleFactor = 1 }
 
+    /// A warning that stays in front of build messages for a few seconds.
+    private var notice: (text: String, until: Date)?
+
     private func setStatus(_ text: String, error: Bool = false) {
         if ProcessInfo.processInfo.environment["TEXSPLIT_SELFTEST"] != nil {
             FileHandle.standardError.write("STATUS \(text)\n".data(using: .utf8)!)
         }
-        status.attributedTitle = NSAttributedString(string: text, attributes: [
-            .foregroundColor: error ? NSColor.systemRed : NSColor.secondaryLabelColor,
-            .font: NSFont.systemFont(ofSize: 12),
-        ])
+        let line = NSMutableAttributedString()
+        if let n = notice, n.until > Date(), n.text != text {
+            line.append(NSAttributedString(string: n.text + "  ·  ", attributes: [
+                .foregroundColor: NSColor.systemOrange, .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            ]))
+        }
+        line.append(NSAttributedString(string: text, attributes: [
+            .foregroundColor: error ? NSColor.systemRed : text == notice?.text ? NSColor.systemOrange : NSColor.secondaryLabelColor,
+            .font: NSFont.systemFont(ofSize: 12, weight: text == notice?.text ? .medium : .regular),
+        ]))
+        status.attributedTitle = line
+    }
+
+    private func showNotice(_ text: String) {
+        notice = (text, Date().addingTimeInterval(10))
+        setStatus(text)
     }
 
     // MARK: Preview's menus (Tools › Annotate, View › sidebar, Edit › Find)
@@ -289,6 +308,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         case #selector(showPDFOnly(_:)): item.state = layout == .pdf ? .on : .off
         case #selector(deleteMark(_:)): return pdfView.selected != nil
         case #selector(toggleLivePreview(_:)): item.state = Self.livePreview ? .on : .off
+        case #selector(toggleLastRound(_:)):
+            item.state = showLastRound ? .on : .off
+            return showLastRound || lastRoundFile != nil
         case #selector(sidebarBookmarks(_:)): item.state = pane.sidebarMode == .bookmarks ? .on : .off
         case #selector(contactSheet(_:)): item.state = pane.sidebarMode == .contactSheet ? .on : .off
         case #selector(addBookmark(_:)): item.title = pane.currentPageBookmarked ? "Remove Bookmark" : "Add Bookmark"
@@ -312,17 +334,77 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         (try? FileManager.default.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
     }
 
+    /// ⌘S: save now and build at once.
     @objc func saveDocument(_ sender: Any?) {
+        if write() { fullBuildWork?.cancel(); rebuild() }
+    }
+
+    /// Write the buffer to disk. Returns false if it could not be written.
+    @discardableResult
+    private func write() -> Bool {
+        autosaveWork?.cancel()
         do {
             try editor.text.write(to: fileURL, atomically: true, encoding: .utf8)
             diskDate = modDate()
             askedAboutDisk = false
             window?.isDocumentEdited = false
-            rebuild()
+            return true
         } catch {
             setStatus("Could not save: \(error.localizedDescription)", error: true)
+            return false
         }
     }
+
+    // MARK: Auto-save, as in Preview
+
+    private var autosaveWork: DispatchWorkItem?
+    private var fullBuildWork: DispatchWorkItem?
+    private static let autosaveDelay = 2.0
+    /// The full build after an auto-save waits for a longer pause when live preview
+    /// already shows the text, so typing in bursts does not queue build after build.
+    private static let fullBuildDelay = 8.0
+
+    private func scheduleAutosave() {
+        // The live-preview test types into a real chapter; that must never reach the disk.
+        guard ProcessInfo.processInfo.environment["TEXSPLIT_LIVETEST"] == nil else { return }
+        autosaveWork?.cancel()
+        fullBuildWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.autosave() }
+        autosaveWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.autosaveDelay, execute: w)
+    }
+
+    /// Save an edited buffer unless the file changed on disk since it was loaded:
+    /// then nothing is written and the usual question is asked. Returns true when
+    /// the buffer is (now) the same as the file.
+    @discardableResult
+    func autosave() -> Bool {
+        autosaveWork?.cancel()
+        guard window?.isDocumentEdited == true else { return true }
+        if let d = modDate(), let known = diskDate, d > known {
+            checkDisk()
+            return false
+        }
+        guard write() else { return false }
+        fullBuildWork?.cancel()
+        if Self.livePreview {
+            let w = DispatchWorkItem { [weak self] in self?.rebuild() }
+            fullBuildWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.fullBuildDelay, execute: w)
+        } else {
+            rebuild()
+        }
+        return true
+    }
+
+    /// Leaving the window or the app saves at once, and closes an open note or text box.
+    func flushEdits() {
+        pdfView.commitMarkEditing()
+        autosave()
+    }
+
+    /// Not the marks here: a note's own popover takes key status when it opens.
+    func windowDidResignKey(_ notification: Notification) { autosave() }
 
     @objc func rebuildNow(_ sender: Any?) { rebuild() }
 
@@ -346,15 +428,159 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
             a.addButton(withTitle: "Load Disk Version")
             a.beginSheetModal(for: window!) { r in
                 if r == .alertSecondButtonReturn { self.load(); self.rebuild() }
-                else { self.diskDate = self.modDate() }
+                else { self.diskDate = self.modDate(); self.autosave() }
             }
         }
+    }
+
+    /// The marks file changed under us (an agent added marks, or the archive procedure
+    /// emptied it): take that in and draw the marks again.
+    private func checkMarksFile() {
+        guard !pdfView.isEditingMark, book.syncFromDisk() else { return }
+        if let doc = pdfView.document {
+            let selectedID = pdfView.selected.flatMap { book.mark(for: $0)?.id }
+            pdfView.selected = nil
+            book.place(on: doc)
+            if let id = selectedID { pdfView.selected = book.annotation(for: id) }
+            pdfView.needsDisplay = true
+        }
+        setStatus("Marks file changed on disk: \(book.marks.count) mark(s) now")
+    }
+
+    // MARK: Last round
+
+    private var showLastRound = false
+    private var lastRoundFile: URL? {
+        Resolution.latestFile(in: book.storeDir.appendingPathComponent("archive", isDirectory: true), stem: book.stem)
+    }
+
+    /// View › Show Last Round: the previous round's marks, faint, where their new text is.
+    @objc func toggleLastRound(_ sender: Any?) {
+        showLastRound.toggle()
+        if showLastRound { ensurePDF() }
+        placeLastRound()
+        if showLastRound, let url = lastRoundFile {
+            let found = pdfView.lastRound.filter(\.placed).count
+            setStatus("Last round (\(url.lastPathComponent)): \(pdfView.lastRound.count) mark(s), \(found) found in the text")
+        }
+    }
+
+    private func placeLastRound() {
+        guard showLastRound, let doc = pdfView.document, let url = lastRoundFile else {
+            if !pdfView.lastRound.isEmpty { pdfView.lastRound = [] }
+            return
+        }
+        pdfView.lastRound = Resolution.place(Resolution.load(url), on: doc)
+    }
+
+    // MARK: Locked paragraphs
+
+    /// Regions already warned about this session, by id.
+    private var warnedLocks: Set<String> = []
+    private var editingLocks = false
+
+    /// Editing a locked paragraph is allowed; the first time per region the status bar says so.
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        guard !editingLocks, textView === editor.textView else { return true }
+        let s = textView.string
+        guard s.contains("LOCKED") else { return true }
+        for r in LockedRegion.all(in: s) where NSIntersectionRange(range, r.range).length > 0
+            || (range.length == 0 && range.location > r.range.location && range.location < NSMaxRange(r.range)) {
+            if warnedLocks.insert(r.id).inserted {
+                showNotice("Locked paragraph \(r.id) — changes will need approval")
+            }
+            break
+        }
+        return true
+    }
+
+    private var chapterPrefix: String {
+        var stem = (rel as NSString).lastPathComponent.replacingOccurrences(of: ".tex", with: "")
+        if let r = stem.range(of: #"^[0-9]+[a-z]?_"#, options: .regularExpression) { stem.removeSubrange(r) }
+        // RelatedWork -> rw; Introduction -> int
+        let caps = stem.filter(\.isUppercase)
+        let p = caps.count >= 2 ? String(caps) : String(stem.filter(\.isLetter).prefix(3))
+        return p.lowercased().isEmpty ? "p" : p.lowercased()
+    }
+
+    /// <chapter prefix>-<first two words>, unique within the file.
+    private func lockID(for paragraph: String, in text: String) -> String {
+        var t = paragraph.replacingOccurrences(of: #"(?<!\\)%.*"#, with: "", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\\(cite[a-z]*|ref|cref|Cref|label|eqref|autoref)\*?(\[[^\]]*\])*\{[^}]*\}"#, with: " ", options: .regularExpression)
+        t = t.replacingOccurrences(of: #"\\[A-Za-z@]+\*?"#, with: " ", options: .regularExpression)
+        let stop: Set<String> = ["the", "and", "for", "with", "this", "that", "from", "into", "are", "was", "its", "our", "but", "not"]
+        let words = t.lowercased().split { !$0.isLetter }.map(String.init)
+            .filter { $0.count >= 3 && $0.allSatisfy(\.isASCII) && !stop.contains($0) }
+        let slug = String(words.prefix(2).joined().prefix(24))
+        let base = chapterPrefix + "-" + (slug.isEmpty ? "para" : slug)
+        let taken = Set(LockedRegion.all(in: text).map(\.id))
+        var id = base, n = 2
+        while taken.contains(id) { id = "\(base)-\(n)"; n += 1 }
+        return id
+    }
+
+    /// Apply one edit to the editor through the text system, so it can be undone.
+    private func replace(_ range: NSRange, with text: String, actionName: String) {
+        let tv = editor.textView
+        editingLocks = true
+        defer { editingLocks = false }
+        guard tv.shouldChangeText(in: range, replacementString: text) else { return }
+        tv.textStorage?.replaceCharacters(in: range, with: text)
+        tv.didChangeText()
+        tv.undoManager?.setActionName(actionName)
+        editor.recolour()
+    }
+
+    /// ⌥⌘L: wrap the paragraph at the cursor, or every paragraph the selection touches.
+    @objc func lockParagraph(_ sender: Any?) {
+        if layout == .pdf { layout = .both }
+        let ns = editor.text as NSString
+        let sel = editor.textView.selectedRange()
+        if let r = LockedRegion.at(sel.location, in: editor.text) { showNotice("Already locked: \(r.id)"); return }
+        func isBlank(_ lineStart: Int) -> Bool {
+            ns.substring(with: ns.lineRange(for: NSRange(location: lineStart, length: 0))).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        // Grow to the blank lines around the selection.
+        var start = ns.lineRange(for: NSRange(location: min(sel.location, ns.length), length: 0)).location
+        var end = NSMaxRange(ns.lineRange(for: NSRange(location: min(max(sel.location, NSMaxRange(sel) - 1), ns.length), length: 0)))
+        if isBlank(start) && sel.length == 0 { NSSound.beep(); setStatus("Put the cursor in a paragraph to lock it"); return }
+        while start > 0 {
+            let prev = ns.lineRange(for: NSRange(location: start - 1, length: 0))
+            if isBlank(prev.location) { break }
+            start = prev.location
+        }
+        while end < ns.length && !isBlank(end) { end = NSMaxRange(ns.lineRange(for: NSRange(location: end, length: 0))) }
+        // Leave blank lines at either edge of a selection outside.
+        while start < end && isBlank(start) { start = NSMaxRange(ns.lineRange(for: NSRange(location: start, length: 0))) }
+        let body = ns.substring(with: NSRange(location: start, length: end - start))
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { NSSound.beep(); return }
+        let id = lockID(for: body, in: editor.text)
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        let wrapped = "% LOCKED \(id) \(f.string(from: Date()))\n" + body + (body.hasSuffix("\n") ? "" : "\n") + "% END LOCKED" + (body.hasSuffix("\n") ? "\n" : "")
+        replace(NSRange(location: start, length: end - start), with: wrapped, actionName: "Lock Paragraph")
+        warnedLocks.insert(id)
+        editor.textView.setSelectedRange(NSRange(location: start, length: 0))
+        showNotice("Locked as \(id)")
+    }
+
+    /// ⇧⌥⌘L: remove the markers around the cursor.
+    @objc func unlockParagraph(_ sender: Any?) {
+        let s = editor.text
+        guard let r = LockedRegion.at(editor.textView.selectedRange().location, in: s) else {
+            NSSound.beep(); setStatus("The cursor is not in a locked paragraph"); return
+        }
+        let body = (s as NSString).substring(with: r.body)
+        replace(r.range, with: body, actionName: "Unlock Paragraph")
+        editor.textView.setSelectedRange(NSRange(location: r.range.location, length: 0))
+        showNotice("Unlocked \(r.id)")
     }
 
     func textDidChange(_ notification: Notification) {
         window?.isDocumentEdited = true
         editor.scheduleRecolour()
         scheduleLiveBuild()
+        scheduleAutosave()
     }
 
     // MARK: Live preview
@@ -381,7 +607,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        pdfView.endTextEditing()
+        pdfView.commitMarkEditing()
+        // Auto-save first; only a file that also changed on disk still asks.
+        if sender.isDocumentEdited, autosave() { return true }
         guard sender.isDocumentEdited else { return true }
         let a = NSAlert()
         a.messageText = "Save changes to \(sender.title)?"
@@ -397,6 +625,9 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     func windowWillClose(_ notification: Notification) {
         watcher?.invalidate()
+        autosaveWork?.cancel()
+        fullBuildWork?.cancel()
+        liveWork?.cancel()
         (NSApp.delegate as? AppDelegate)?.closed(self)
     }
 
@@ -474,6 +705,8 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
 
     @objc func refreshWholeThesis(_ sender: Any?) { refreshFullIfStale(force: true) }
 
+    private var lastUnfound = 0
+
     /// Load the new PDF where the old one was being read, then put the marks back.
     private func showPDF() {
         guard let data = try? Data(contentsOf: builder.pdfURL), let doc = PDFDocument(data: data) else { return }
@@ -495,6 +728,11 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         }
         if pane.rotation != 0 { pane.applyRotation() }
         book.place(on: doc)
+        if book.unfound > 0 && book.unfound != lastUnfound {
+            showNotice("\(book.unfound) highlight(s) not found in the new text: shown where they were")
+        }
+        lastUnfound = book.unfound
+        placeLastRound()
         if let id = selectedID { pdfView.selected = book.annotation(for: id) }
         pane.documentChanged()
         if let t0 = liveTestStart, let doc = pdfView.document, !doc.findString("Livepreviewcheck\(liveRound)", withOptions: []).isEmpty {
@@ -550,6 +788,34 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         // The chapter-only wrapper is main.tex line for line, with other chapters commented out.
         if path == "\(builder.jobName).tex" { path = "main.tex" }
         return (path, hit.line)
+    }
+
+    /// The source line near `line` that holds `text`: SyncTeX often answers with the
+    /// blank line between two paragraphs, or a comment. Lines within 30 either way
+    /// are scored by how many of the text's words they contain; ties go to the nearest.
+    func textLine(file: String, near line: Int, text: String) -> Int {
+        let source = file == rel || file.hasSuffix("/" + rel) ? editor.text
+            : (try? String(contentsOf: thesisRoot.appendingPathComponent(file), encoding: .utf8)) ?? ""
+        let lines = source.components(separatedBy: "\n")
+        guard line >= 1, line <= lines.count else { return line }
+        let words = Set(text.lowercased().split { !$0.isLetter }.map(String.init).filter { $0.count >= 4 })
+        func usable(_ i: Int) -> Bool {
+            let t = lines[i - 1].trimmingCharacters(in: .whitespaces)
+            return !t.isEmpty && !t.hasPrefix("%")
+        }
+        func score(_ i: Int) -> Int {
+            let l = lines[i - 1].lowercased()
+            return words.reduce(0) { $0 + (l.contains($1) ? 1 : 0) }
+        }
+        if usable(line) && (words.isEmpty || score(line) > 0) { return line }
+        var best: (line: Int, score: Int, dist: Int)?
+        for d in 0...30 {
+            for i in Set([line - d, line + d]) where i >= 1 && i <= lines.count && usable(i) {
+                let sc = score(i)
+                if best == nil || sc > best!.score { best = (i, sc, d) }
+            }
+        }
+        return best?.line ?? line
     }
 
     func commandClick(page: PDFPage, point: NSPoint) {

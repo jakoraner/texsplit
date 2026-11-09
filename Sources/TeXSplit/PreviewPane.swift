@@ -821,7 +821,7 @@ final class PreviewPane: NSView, NSOutlineViewDataSource, NSOutlineViewDelegate,
         case "Text", "FreeText": what = m.comment
         default: what = MarkBook.label(book?.annotation(for: m.id) ?? PDFAnnotation(bounds: .zero, forType: .square, withProperties: nil))
         }
-        let note = m.isTextMarkup && !m.comment.isEmpty ? m.comment : nil
+        let note = m.isTextMarkup && !m.comment.isEmpty ? m.comment : (m.anchor?.isEmpty == false ? "next to: " + m.anchor! : nil)
         let colour = book?.annotation(for: m.id)?.color
         return Cell.make(t, title: what, detail: note, trailing: "\(m.page)", swatch: colour, source: "\((m.file as NSString).lastPathComponent):\(m.line)")
     }

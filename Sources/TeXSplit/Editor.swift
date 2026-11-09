@@ -80,6 +80,10 @@ final class SourceEditor {
         let s = textView.string
         let all = NSRange(location: 0, length: (s as NSString).length)
         lm.removeTemporaryAttribute(.foregroundColor, forCharacterRange: all)
+        lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: all)
+        for r in LockedRegion.all(in: s) {
+            lm.addTemporaryAttribute(.backgroundColor, value: NSColor.systemBlue.withAlphaComponent(0.07), forCharacterRange: r.range)
+        }
         let rules: [(String, NSColor)] = [
             (#"\\[A-Za-z@]+\*?"#, .systemPurple),
             (#"\$[^$\n]*\$"#, .systemTeal),
@@ -91,6 +95,44 @@ final class SourceEditor {
                 if let r = m?.range { lm.addTemporaryAttribute(.foregroundColor, value: colour, forCharacterRange: r) }
             }
         }
+    }
+}
+
+/// A run of paragraphs the author has signed off, between
+/// `% LOCKED <id> <YYYY-MM-DD>` and `% END LOCKED`. Editing inside one is
+/// allowed, but the change will need approval.
+struct LockedRegion {
+    let id: String
+    let date: String
+    /// From the start of the opening marker line to the end of the closing one.
+    let range: NSRange
+    /// The lines between the markers.
+    let body: NSRange
+
+    private static let open = try! NSRegularExpression(pattern: #"^[ \t]*%[ \t]*LOCKED[ \t]+(\S+)(?:[ \t]+(\S+))?[ \t]*$"#, options: .anchorsMatchLines)
+    private static let close = try! NSRegularExpression(pattern: #"^[ \t]*%[ \t]*END LOCKED[ \t]*$"#, options: .anchorsMatchLines)
+
+    static func all(in s: String) -> [LockedRegion] {
+        guard s.contains("LOCKED") else { return [] }
+        let ns = s as NSString
+        let all = NSRange(location: 0, length: ns.length)
+        let ends = close.matches(in: s, range: all).map(\.range)
+        var out: [LockedRegion] = []
+        var after = 0
+        for m in open.matches(in: s, range: all) where m.range.location >= after {
+            guard let end = ends.first(where: { $0.location > m.range.location }) else { break }
+            let id = ns.substring(with: m.range(at: 1))
+            let date = m.range(at: 2).location == NSNotFound ? "" : ns.substring(with: m.range(at: 2))
+            let full = ns.lineRange(for: NSRange(location: m.range.location, length: NSMaxRange(end) - m.range.location))
+            let bodyStart = NSMaxRange(ns.lineRange(for: m.range))
+            out.append(LockedRegion(id: id, date: date, range: full, body: NSRange(location: bodyStart, length: max(0, end.location - bodyStart))))
+            after = NSMaxRange(end)
+        }
+        return out
+    }
+
+    static func at(_ location: Int, in s: String) -> LockedRegion? {
+        all(in: s).first { NSLocationInRange(location, $0.range) }
     }
 }
 
