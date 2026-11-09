@@ -19,6 +19,11 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
     private let status = NSButton(title: "", target: nil, action: nil)
 
     private var sync: SyncTeX?
+    /// Line count and cursor line of the source the shown PDF was built from, and of
+    /// the build in flight: lets the reading position follow lines inserted above it.
+    private var shownLines = 0
+    private var buildingLines = 0
+    private var buildingCursor = Int.max
     private var building = false
     private var lastError: (file: String, line: Int)?
     private var diskDate: Date?
@@ -647,6 +652,8 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         if !live { setStatus("Building…") }
         // The editor's text, whenever it differs from the file on disk.
         let text: String? = window?.isDocumentEdited == true ? editor.text : nil
+        buildingLines = editor.text.components(separatedBy: "\n").count
+        buildingCursor = editor.currentLine
         DispatchQueue.global(qos: .userInitiated).async {
             let r = self.builder.build(text: text, live: live)
             DispatchQueue.main.async {
@@ -720,11 +727,42 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         let auto = pdfView.autoScales || pdfView.document == nil
         let selectedID = pdfView.selected.flatMap { book.mark(for: $0)?.id }
         pdfView.selected = nil
+        // Anchor the reading position to the source line at the top of the view, not to a
+        // page number: an edit that moves text by a page, or a chapter build whose page
+        // count changes, otherwise lands the reader somewhere else.
+        var anchor: (path: String, line: Int, dy: Double)?
+        if let old = sync, let i = pageIndex, let pt = point, let oldPage = pdfView.document?.page(at: i) {
+            let topY = Double(oldPage.bounds(for: .mediaBox).height - pt.y)
+            if let src = old.source(page: i + 1, x: Double(pt.x) + 72, y: topY + 12),
+               let at = old.position(path: src.path, line: src.line) {
+                var line = src.line
+                // Lines typed above the anchor in this chapter shift it down.
+                if src.path.hasSuffix("/" + rel) || src.path == rel, buildingCursor < line, shownLines > 0 {
+                    line += buildingLines - shownLines
+                }
+                anchor = (src.path, line, topY - at.y)
+            }
+        }
+        shownLines = buildingLines
         pdfView.document = doc
         sync = SyncTeX(url: builder.synctexURL)
         if !auto { pdfView.scaleFactor = scale }
-        if let i = pageIndex, let page = doc.page(at: min(i, doc.pageCount - 1)) {
-            pdfView.go(to: PDFDestination(page: page, at: point ?? NSPoint(x: 0, y: page.bounds(for: .mediaBox).height)))
+        pdfView.layoutDocumentView()
+        var dest: PDFDestination?
+        if let a = anchor, let s = sync, let pos = s.position(path: a.path, line: a.line), let page = doc.page(at: pos.page - 1) {
+            let h = Double(page.bounds(for: .mediaBox).height)
+            dest = PDFDestination(page: page, at: NSPoint(x: point?.x ?? 0, y: CGFloat(min(h, max(0, h - (pos.y + a.dy))))))
+        } else if let i = pageIndex, let page = doc.page(at: min(i, doc.pageCount - 1)) {
+            dest = PDFDestination(page: page, at: point ?? NSPoint(x: 0, y: page.bounds(for: .mediaBox).height))
+        }
+        if let d = dest {
+            pdfView.go(to: d)
+            // PDFKit can still re-lay out the new document after this call and scroll to
+            // its first page; going there again on the next turn of the run loop holds it.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.pdfView.document === doc else { return }
+                self.pdfView.go(to: d)
+            }
         }
         if pane.rotation != 0 { pane.applyRotation() }
         book.place(on: doc)
