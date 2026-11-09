@@ -70,9 +70,10 @@ final class SyncTeX {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
+        let exit = ExitWaiter(p)
         do { try p.run() } catch { return nil }
         let data = out.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+        exit.wait()
         return String(decoding: data, as: UTF8.self)
     }
 

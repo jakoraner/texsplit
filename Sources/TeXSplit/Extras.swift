@@ -135,3 +135,17 @@ final class SignaturePad: NSView {
 
     @objc private func clearAction(_ sender: Any?) { clear() }
 }
+
+
+/// Waits for a child process without running a run loop. `Process.waitUntilExit()`
+/// spins the calling thread's run loop while it waits: on a build thread that let
+/// PDFKit's thumbnail view lay itself out off the main thread, which AppKit aborts
+/// on (crash of 9 Nov 2026), and on the main thread it re-enters the event loop in
+/// the middle of swapping in a new PDF. Create it before `run()`, call `wait()` after.
+final class ExitWaiter {
+    private let done = DispatchSemaphore(value: 0)
+    init(_ process: Process) {
+        process.terminationHandler = { [done] _ in done.signal() }
+    }
+    func wait() { done.wait() }
+}
