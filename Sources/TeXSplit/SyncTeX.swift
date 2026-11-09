@@ -98,10 +98,19 @@ final class SyncTeX {
         return (path, b.line)
     }
 
+    /// Source -> PDF for an input path exactly as this file names it (from `source`).
+    func position(path: String, line: Int) -> (page: Int, x: Double, y: Double)? {
+        let tags = Set(inputs.filter { $0.value == path }.keys)
+        return nearest(tags: tags, line: line)
+    }
+
     /// Source -> PDF: first typeset position of `line` in `rel`, or of the nearest
     /// line that produced output (blank and comment lines produce none).
     func position(rel: String, line: Int) -> (page: Int, x: Double, y: Double)? {
-        let tags = Set(inputs.filter { matches($0.value, rel) }.keys)
+        nearest(tags: Set(inputs.filter { matches($0.value, rel) }.keys), line: line)
+    }
+
+    private func nearest(tags: Set<Int>, line: Int) -> (page: Int, x: Double, y: Double)? {
         guard !tags.isEmpty else { return nil }
         var best: (page: Int, rec: SyncRecord)?
         var bestGap = Int.max
