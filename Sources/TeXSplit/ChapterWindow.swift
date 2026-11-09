@@ -83,9 +83,11 @@ final class ChapterWindow: NSWindowController, NSWindowDelegate, NSTextViewDeleg
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
+        let exit = ExitWaiter(p)
         guard (try? p.run()) != nil else { return repo }
-        p.waitUntilExit()
-        let dir = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        exit.wait()
+        let dir = String(decoding: data, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return p.terminationStatus == 0 && dir.hasSuffix("/.git") ? URL(fileURLWithPath: String(dir.dropLast(5))) : repo
     }

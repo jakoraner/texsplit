@@ -168,6 +168,7 @@ final class Builder {
         let out = Pipe(), err = Pipe()
         p.standardOutput = out
         p.standardError = err
+        let exit = ExitWaiter(p)
         do { try p.run() } catch { return (-1, "", "\(error)") }
         // Read both pipes concurrently so a chatty build cannot fill one and stall.
         var errData = Data()
@@ -176,7 +177,7 @@ final class Builder {
         DispatchQueue.global().async { errData = err.fileHandleForReading.readDataToEndOfFile(); group.leave() }
         let outData = out.fileHandleForReading.readDataToEndOfFile()
         group.wait()
-        p.waitUntilExit()
+        exit.wait()
         return (p.terminationStatus, String(decoding: outData, as: UTF8.self), String(decoding: errData, as: UTF8.self))
     }
 }
